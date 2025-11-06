@@ -1061,38 +1061,47 @@ const App = {
    * @return {Promise<void>}
    */
   async login(username, password) {
+    // Prevent multiple simultaneous login attempts
     if (this.state.isLoggingIn) {
       console.log("A login attempt is already in progress.");
       return;
     }
 
+    // Set state to "logging in"
     this.setState({ isLoggingIn: true });
     const loginButton = document.getElementById("login-button");
     const loginErrorMsg = document.getElementById("login-error-msg");
 
+    // Disable login button and show "in progress" text
     if (loginButton) {
       loginButton.disabled = true;
       loginButton.textContent = this.t("LOGIN_IN_PROGRESS");
     }
 
+    // Hide the error message field before starting
     if (loginErrorMsg) {
-      loginErrorMsg.style.display = "none";
-      loginErrorMsg.style.opacity = 0;
+	  loginErrorMsg.classList.remove("active");
     }
 
     try {
+      // Call the Rust backend 'login' command
       console.log("invoke login from backend");
       const response = await invoke("login", { username, password });
+      
+      // If invoke() succeeds, Rust returned Ok(string), so parse it.
       const jsonResponse = JSON.parse(response);
 
+      // Check if the API response indicates a successful login
       if (
         jsonResponse &&
         jsonResponse.Return &&
         jsonResponse.Msg === "success"
       ) {
+        // Store auth info received from the backend
         this.storeAuthInfo(jsonResponse);
         console.log("Login success");
 
+        // If update checks are disabled, skip to home screen
         if (!UPDATE_CHECK_ENABLED) {
           console.log(
             "Updates are disabled, skipping update check and server connection",
@@ -1111,27 +1120,66 @@ const App = {
         // Check server connection after successful login
         const isConnected = await this.checkServerConnection();
         if (isConnected) {
+          // If connected, proceed to check for game updates
           console.log("Login success 2");
           await this.initializeAndCheckUpdates(true);
           await this.Router.navigate("home");
         } else {
+          // If login was ok but file server is down
           throw new Error(this.t("SERVER_CONNECTION_ERROR"));
         }
       } else {
+        // Handle cases where the API call was successful (200 OK) 
+        // but the business logic failed (e.g., "Return: false")
         const errorMessage = jsonResponse
           ? jsonResponse.Msg || this.t("LOGIN_ERROR")
           : this.t("LOGIN_ERROR");
         throw new Error(errorMessage);
       }
     } catch (error) {
+      // --- FIXED ERROR HANDLING ---
+      // This block catches:
+      // 1. Rust Err(string) -> `error` is a string.
+      // 2. JavaScript `throw new Error(...)` -> `error` is an object.
+      // 3. Network/parsing errors.
+
       console.error("Error during login:", error);
-      if (loginErrorMsg) {
-        loginErrorMsg.textContent =
-          error.message || this.t("SERVER_CONNECTION_ERROR");
-        loginErrorMsg.style.display = "flex";
-        loginErrorMsg.style.opacity = 1;
+
+      // Determine the actual error message
+      let errorMessage = this.t("SERVER_CONNECTION_ERROR"); // Default fallback
+      
+      if (typeof error === 'string') {
+        // This is a direct error string from Rust (e.g., "Invalid login or password")
+        errorMessage = error;
+      } else if (error && error.message) {
+        // This is a standard JavaScript Error object
+        errorMessage = error.message;
       }
+
+      // Now, display the correct message
+      if (loginErrorMsg) {
+        
+        // --- Optional: Map specific errors to translation keys ---
+        if (errorMessage === "Invalid login or password") {
+          // If you have a translation key for this, use it.
+          // If not, just let 'errorMessage' be the raw string.
+          loginErrorMsg.textContent = this.t("LOGIN_ERROR") || errorMessage;
+          
+          // Here you could also show a specific UI element, e.g.
+          // document.getElementById("password-error-placeholder").style.display = 'block';
+
+        } else {
+          // For all other errors (real connection issues, etc.)
+          loginErrorMsg.textContent = this.t("SERVER_CONNECTION_ERROR");
+        }
+        
+        // Show the error message
+        loginErrorMsg.classList.add("active");
+      }
+      // --- END FIXED ERROR HANDLING ---
     } finally {
+      // This block always runs, whether login succeeded or failed
+      // Re-enable the login button and reset its text
       this.setState({ isLoggingIn: false });
       if (loginButton) {
         loginButton.disabled = false;
@@ -1359,17 +1407,6 @@ const App = {
       console.log("Creating log modal");
       this.createLogModal();
 
-      console.log("Attempting to show log modal");
-      this.toggleModal("log-modal", true);
-
-      // Check if the modal is visible
-      const logModal = document.getElementById("log-modal");
-      if (logModal) {
-        console.log("Log modal display style:", logModal.style.display);
-      } else {
-        console.log("Log modal element not found");
-      }
-
       const result = await invoke("handle_launch_game");
       console.log("Game launch result:", result);
     } catch (error) {
@@ -1460,7 +1497,7 @@ const App = {
   updateHashFileProgressUI() {
     const modal = document.getElementById("hash-file-progress-modal");
     if (!modal || modal.style.display === "none") {
-      return; // Ne pas mettre à jour si le modal n'est pas visible
+      return; // Do not update if the modal is not visible
     }
 
     const progressBar = modal.querySelector(".hash-progress-bar");
@@ -1482,7 +1519,7 @@ const App = {
       progressTextEl.textContent = `${progressText} ${this.state.processedFiles}/${this.state.totalFiles} (${this.state.hashFileProgress.toFixed(2)}%)`;
     }
 
-    // Mettre à jour le titre du modal si nécessaire
+    // Update the modal title if necessary
     const modalTitle = modal.querySelector("h2");
     if (modalTitle) {
       modalTitle.textContent = this.t("GENERATING_HASH_FILE");
@@ -2553,6 +2590,12 @@ const App = {
    * to allow the user to interact with the window.
    */
   setupWindowControls() {
+	// Game logs
+	const appDebugBtn = document.getElementById("debug-button");
+    if (appDebugBtn) {
+      appDebugBtn.addEventListener("click", () => this.toggleModal("log-modal", true));
+    }
+	    
     const appMinimizeBtn = document.getElementById("app-minimize");
     if (appMinimizeBtn) {
       appMinimizeBtn.addEventListener("click", () => appWindow.minimize());

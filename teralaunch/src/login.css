@@ -34,8 +34,7 @@
   padding: 0 1px 0 0;
   box-sizing: border-box;
 }
-.input-text,
-.input-text1 {
+.input-text {
   width: 100%;
   border: 1px solid rgba(255, 255, 255, 0.03);
   outline: 0;
@@ -50,11 +49,13 @@
   font-size: 14px;
   color: rgba(255, 255, 255, 0.4);
   min-width: 154px;
+  
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
 }
 .input-fields,
-.input-fields-wrapper,
-.input-text,
-.input-text1 {
+.input-fields-wrapper {
   display: flex;
   align-items: flex-start;
   justify-content: flex-start;
@@ -113,7 +114,6 @@
   font-family: Raleway;
   text-align: left;
 }
-.login-error-msg,
 .login-form,
 .login-form-container {
   display: flex;
@@ -124,13 +124,27 @@
   background-color: rgb(255 62 62 / 22%);
   color: #c17070;
   text-align: center;
-  padding: 10px;
-  margin-bottom: 10px;
+  justify-content: center;
+  align-items: center;
   border-radius: 5px;
   font-weight: bold;
-  transition: opacity 0.3s ease, transform 0.3s ease;
+  width: 100%;
+  box-sizing: border-box;
+  opacity: 0;
+  transform: translateY(-10px);
+  height: 0;
+  overflow: hidden;
+  transition: opacity 0.3s ease, transform 0.3s ease, height 0.3s ease, padding 0.3s ease;
+  padding: 0;
+  margin: 0;
 }
-
+.login-error-msg.active {
+  opacity: 1;
+  transform: translateY(0);
+  height: auto;
+  padding: 10px;
+  margin-bottom: 10px;
+}
 .login-form,
 .login-form-container {
   flex-direction: column;
@@ -178,4 +192,15 @@
   background-position: top;
   letter-spacing: normal;
   line-height: normal;
+}
+
+input[type="password"].input-text {
+  background-color: rgba(255, 255, 255, 0.08) !important;
+  color: rgba(255, 255, 255, 0.4) !important;
+  border: 1px solid rgba(255, 255, 255, 0.03) !important;
+  text-align: center;
+  caret-color: #fff;
+  mix-blend-mode: normal !important;
+  backdrop-filter: none !important;
+  -webkit-text-security: disc !important;
 }

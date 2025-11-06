@@ -30,7 +30,7 @@ use sha2::{Sha256, Digest};
 use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use walkdir::WalkDir;
-
+use reqwest::cookie::Jar;
 
 // Struct definitions
 #[derive(Serialize, Deserialize)]
@@ -81,7 +81,66 @@ lazy_static! {
     });
 }
 
+// Struct for the initial /launcher/LoginAction response
+#[derive(Deserialize)]
+struct InitialLoginResponse {
+    #[serde(rename = "Return")]
+    return_value: bool,
+    #[serde(rename = "Msg")]
+    msg: String,
+    #[serde(rename = "ReturnCode")]
+    return_code: i32,
+}
 
+// Struct for the /launcher/GetAccountInfoAction response
+#[derive(Deserialize)]
+struct AccountInfoResponse {
+    #[serde(rename = "UserNo")]
+    user_no: i32,
+    #[serde(rename = "UserName")]
+    user_name: String,
+    #[serde(rename = "Permission")]
+    permission: i32,
+    #[serde(rename = "Privilege")]
+    privilege: i32,
+}
+
+// Struct for the /launcher/GetAuthKeyAction response
+#[derive(Deserialize)]
+struct AuthKeyResponse {
+    #[serde(rename = "AuthKey")]
+    auth_key: String,
+}
+
+// Struct for the /launcher/GetCharacterCountAction response
+#[derive(Deserialize)]
+struct CharCountResponse {
+    #[serde(rename = "CharacterCount")]
+    character_count: String,
+}
+
+// This struct combines all info into the format the frontend expects (same as old LoginResponse)
+#[derive(Serialize)]
+struct CombinedLoginResponse {
+    #[serde(rename = "Return")]
+    return_value: bool,
+    #[serde(rename = "ReturnCode")]
+    return_code: i32,
+    #[serde(rename = "Msg")]
+    msg: String,
+    #[serde(rename = "CharacterCount")]
+    character_count: String,
+    #[serde(rename = "Permission")]
+    permission: i32,
+    #[serde(rename = "Privilege")]
+    privilege: i32,
+    #[serde(rename = "UserNo")]
+    user_no: i32,
+    #[serde(rename = "UserName")]
+    user_name: String,
+    #[serde(rename = "AuthKey")]
+    auth_key: String,
+}
 
 /* const CONFIG: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/config/config.json"));
 
@@ -934,26 +993,104 @@ fn set_auth_info(auth_key: String, user_name: String, user_no: i32, character_co
 
 #[tauri::command]
 async fn login(username: String, password: String) -> Result<String, String> {
-    let client = Client::new();
-    let url = get_config_value("LOGIN_ACTION_URL");
-
-    let payload = format!("login={}&password={}", username, password);
-
-    let res = client
-        .post(url)
-        .body(payload)
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .send().await
+    // 1. Create a client with a persistent cookie jar
+    let cookie_jar = Arc::new(Jar::default());
+    let client = Client::builder()
+        .cookie_store(true)
+        .cookie_provider(Arc::clone(&cookie_jar))
+        .build()
         .map_err(|e| e.to_string())?;
 
-    let body = res.text().await.map_err(|e| e.to_string())?;
+    // --- Obtener URLs ---
+    
+    // 1. Obtener la URL completa para LoginAction (ej: "http://.../launcher/LoginAction")
+    let login_url = get_config_value("LOGIN_ACTION_URL");
 
-    println!("Response body: {}", body);
+    // 2. Derivar la URL base eliminando el endpoint específico.
+    //    (ej: "http://.../launcher/LoginAction" -> "http://...")
+    let base_url = login_url.trim_end_matches("/launcher/LoginAction").to_string();
 
-    match serde_json::from_str::<Value>(&body) {
-        Ok(json) => Ok(json.to_string()),
-        Err(_) => Ok(body),
+
+    // --- Step 1: POST to /launcher/LoginAction ---
+    // Usar la 'login_url' completa directamente
+    let payload = format!("login={}&password={}", username, password);
+
+    let login_res = client
+        .post(&login_url) // Usar la URL completa leída del config
+        .body(payload)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !login_res.status().is_success() {
+        return Err(format!("Login request failed with status: {}", login_res.status()));
     }
+
+    // Parse the initial login response to check for success
+    let login_body: InitialLoginResponse = login_res
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse login response: {}.", e))?;
+
+    if !login_body.return_value {
+        // Return the error message from the API (e.g., "Invalid password")
+        return Err(login_body.msg);
+    }
+    
+    // Store the success message to return later
+    let success_msg = login_body.msg.clone();
+
+    // --- Step 2: GET /launcher/GetAccountInfoAction ---
+    // Construir las siguientes URLs usando la 'base_url' derivada
+    let account_info_url = format!("{}/launcher/GetAccountInfoAction", base_url);
+    let account_info: AccountInfoResponse = client
+        .get(&account_info_url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to get account info: {}", e))?
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse account info: {}", e))?;
+
+    // --- Step 3: GET /launcher/GetAuthKeyAction ---
+    let auth_key_url = format!("{}/launcher/GetAuthKeyAction", base_url);
+    let auth_key: AuthKeyResponse = client
+        .get(&auth_key_url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to get auth key: {}", e))?
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse auth key: {}", e))?;
+
+    // --- Step 4: GET /launcher/GetCharacterCountAction ---
+    let char_count_url = format!("{}/launcher/GetCharacterCountAction", base_url);
+    let char_count: CharCountResponse = client
+        .get(&char_count_url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to get character count: {}", e))?
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse character count: {}", e))?;
+
+    // --- Step 5: Aggregate all data and serialize to JSON string ---
+    let combined_response = CombinedLoginResponse {
+        return_value: true,
+        return_code: login_body.return_code, // Use ReturnCode from initial login
+        msg: success_msg, // Use success message from initial login
+        character_count: char_count.character_count,
+        permission: account_info.permission,
+        privilege: account_info.privilege,
+        user_no: account_info.user_no,
+        user_name: account_info.user_name,
+        auth_key: auth_key.auth_key,
+    };
+
+    // Return the combined data as a JSON string, matching the function's original return type
+    serde_json::to_string(&combined_response)
+        .map_err(|e| format!("Failed to serialize final login response: {}", e))
 }
 
 #[tauri::command]
