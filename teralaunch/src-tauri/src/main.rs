@@ -393,21 +393,21 @@ async fn check_maintenance_and_notify(window: tauri::Window) -> Result<bool, Str
             let is_maintenance = response.start_time.is_some() || response.end_time.is_some();
 
             if is_maintenance {
-                // Emitir el evento con los detalles completos del mantenimiento para el modal
+                // Emit the event with full maintenance details for the modal
                 let payload = serde_json::to_value(&response)
-                    .unwrap_or(json!({"msg": "Mantenimiento activo"}));
+                    .unwrap_or(json!({"msg": "Active maintenance"}));
 
                 if let Err(e) = window.emit("maintenance_active", payload) {
                     error!("Failed to emit maintenance_active event: {:?}", e);
                 }
             }
 
-            // Devolver 'true' si hay mantenimiento, 'false' si no lo hay
+            // Return 'true' if maintenance is active, 'false' otherwise
             Ok(is_maintenance)
         }
         Err(e) => {
             error!("Error checking maintenance status: {:?}", e);
-            // Devolver un error específico para que el frontend lo pueda manejar como un problema de red
+            // Return a specific error so the frontend can handle it as a network issue
             Err(format!("ERROR_NETWORK_CHECK: {}", e))
         }
     }
