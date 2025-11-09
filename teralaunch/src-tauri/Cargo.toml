@@ -32,6 +32,8 @@ env_logger = "0.10.0"
 devtools = "0.3.3"
 tracing = "0.1"
 dotenv = "0.15.0"
+url = "2.5.7"
+regex = "1.12.2"
 
 
 

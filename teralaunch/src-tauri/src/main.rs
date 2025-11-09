@@ -6,7 +6,7 @@ use std::env;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Once, RwLock};
+use std::sync::{Arc, RwLock};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -18,7 +18,7 @@ use tokio::io::AsyncWriteExt;
 use rayon::prelude::*;
 use tokio::runtime::Runtime;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json};
 use tauri::{Manager};
 use tauri::api::dialog::FileDialogBuilder;
 use teralib::{get_game_status_receiver, run_game, reset_global_state};
@@ -31,183 +31,200 @@ use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use walkdir::WalkDir;
 use reqwest::cookie::Jar;
+use reqwest::cookie::CookieStore;
+use url::Url;
+use regex::Regex;
 
 // Struct definitions
 #[derive(Serialize, Deserialize)]
 struct LoginResponse {
-    #[serde(rename = "Return")]
-    return_value: bool,
-    #[serde(rename = "ReturnCode")]
-    return_code: i32,
-    #[serde(rename = "Msg")]
-    msg: String,
-    #[serde(rename = "CharacterCount")]
-    character_count: String,
-    #[serde(rename = "Permission")]
-    permission: i32,
-    #[serde(rename = "Privilege")]
-    privilege: i32,
-    #[serde(rename = "UserNo")]
-    user_no: i32,
-    #[serde(rename = "UserName")]
-    user_name: String,
-    #[serde(rename = "AuthKey")]
-    auth_key: String,
+  #[serde(rename = "Return")]
+  return_value: bool,
+  #[serde(rename = "ReturnCode")]
+  return_code: i32,
+  #[serde(rename = "Msg")]
+  msg: String,
+  #[serde(rename = "CharacterCount")]
+  character_count: String,
+  #[serde(rename = "Permission")]
+  permission: i32,
+  #[serde(rename = "Privilege")]
+  privilege: i32,
+  #[serde(rename = "UserNo")]
+  user_no: i32,
+  #[serde(rename = "UserName")]
+  user_name: String,
+  #[serde(rename = "AuthKey")]
+  auth_key: String,
 }
 
 #[derive(Serialize)]
 struct AuthInfo {
-    character_count: String,
-    permission: i32,
-    privilege: i32,
-    user_no: i32,
-    user_name: String,
-    auth_key: String,
+  character_count: String,
+  permission: i32,
+  privilege: i32,
+  user_no: i32,
+  user_name: String,
+  auth_key: String,
 }
 
 struct GlobalAuthInfo {
-    character_count: String,
-    user_no: i32,
-    user_name: String,
-    auth_key: String,
+  character_count: String,
+  user_no: i32,
+  user_name: String,
+  auth_key: String,
 }
 
 lazy_static! {
-    static ref GLOBAL_AUTH_INFO: RwLock<GlobalAuthInfo> = RwLock::new(GlobalAuthInfo {
-        character_count: String::new(),
-        user_no: 0,
-        user_name: String::new(),
-        auth_key: String::new(),
-    });
-}
+  static ref GLOBAL_AUTH_INFO: RwLock<GlobalAuthInfo> = RwLock::new(GlobalAuthInfo {
+    character_count: String::new(),
+    user_no: 0,
+    user_name: String::new(),
+    auth_key: String::new(),
+  });
 
-lazy_static! {
-    static ref LAUNCHER_BASE_URL: String = get_config_value("LAUNCHER_ACTION_URL");
+  static ref AUTHENTICATED_CLIENT: Mutex<Option<Client>> = Mutex::new(None);
+
+  static ref LAUNCHER_BASE_URL: String = get_config_value("LAUNCHER_ACTION_URL");
+
+  static ref GLOBAL_ACTS_MAP: RwLock<HashMap<String, String>> = RwLock::new(HashMap::new());
+  static ref GLOBAL_PAGES_MAP: RwLock<HashMap<String, String>> = RwLock::new(HashMap::new());
 }
 
 // Struct for the initial /launcher/LoginAction response
 #[derive(Deserialize)]
 struct InitialLoginResponse {
-    #[serde(rename = "Return")]
-    return_value: bool,
-    #[serde(rename = "Msg")]
-    msg: String,
-    #[serde(rename = "ReturnCode")]
-    return_code: i32,
+  #[serde(rename = "Return")]
+  return_value: bool,
+  #[serde(rename = "Msg")]
+  msg: String,
+  #[serde(rename = "ReturnCode")]
+  return_code: i32,
 }
 
 // Struct for the /launcher/GetAccountInfoAction response
 #[derive(Deserialize)]
 struct AccountInfoResponse {
-    #[serde(rename = "UserNo")]
-    user_no: i32,
-    #[serde(rename = "UserName")]
-    user_name: String,
-    #[serde(rename = "Permission")]
-    permission: i32,
-    #[serde(rename = "Privilege")]
-    privilege: i32,
+  #[serde(rename = "UserNo")]
+  user_no: i32,
+  #[serde(rename = "UserName")]
+  user_name: String,
+  #[serde(rename = "Permission")]
+  permission: i32,
+  #[serde(rename = "Privilege")]
+  privilege: i32,
+  #[serde(rename = "Banned", default)] 
+  banned: bool,
 }
 
 // Struct for the /launcher/GetAuthKeyAction response
 #[derive(Deserialize)]
 struct AuthKeyResponse {
-    #[serde(rename = "AuthKey")]
-    auth_key: String,
+  #[serde(rename = "AuthKey")]
+  auth_key: String,
 }
 
 // Struct for the /launcher/GetCharacterCountAction response
 #[derive(Deserialize)]
 struct CharCountResponse {
-    #[serde(rename = "CharacterCount")]
-    character_count: String,
+  #[serde(rename = "CharacterCount")]
+  character_count: String,
 }
 
 // Struct for the /launcher/GetMaintenanceStatusAction response
 #[derive(Deserialize, Debug, Clone, Serialize)]
 struct MaintenanceResponse {
-    #[serde(rename = "Return")]
-    return_value: bool,
-    #[serde(rename = "ReturnCode")]
-    return_code: i32,
-    #[serde(rename = "Msg")]
-    msg: String,
-    #[serde(rename = "StartTime")]
-    start_time: Option<u64>,
-    #[serde(rename = "EndTime")]
-    end_time: Option<u64>,
+  #[serde(rename = "Return")]
+  return_value: bool,
+  #[serde(rename = "ReturnCode")]
+  return_code: i32,
+  #[serde(rename = "Msg")]
+  msg: String,
+  #[serde(rename = "StartTime")]
+  start_time: Option<u64>,
+  #[serde(rename = "EndTime")]
+  end_time: Option<u64>,
 }
 
 // This struct combines all info into the format the frontend expects (same as old LoginResponse)
 #[derive(Serialize)]
 struct CombinedLoginResponse {
-    #[serde(rename = "Return")]
-    return_value: bool,
-    #[serde(rename = "ReturnCode")]
-    return_code: i32,
-    #[serde(rename = "Msg")]
-    msg: String,
-    #[serde(rename = "CharacterCount")]
-    character_count: String,
-    #[serde(rename = "Permission")]
-    permission: i32,
-    #[serde(rename = "Privilege")]
-    privilege: i32,
-    #[serde(rename = "UserNo")]
-    user_no: i32,
-    #[serde(rename = "UserName")]
-    user_name: String,
-    #[serde(rename = "AuthKey")]
-    auth_key: String,
+  #[serde(rename = "Return")]
+  return_value: bool,
+  #[serde(rename = "ReturnCode")]
+  return_code: i32,
+  #[serde(rename = "Msg")]
+  msg: String,
+  #[serde(rename = "CharacterCount")]
+  character_count: String,
+  #[serde(rename = "Permission")]
+  permission: i32,
+  #[serde(rename = "Privilege")]
+  privilege: i32,
+  #[serde(rename = "UserNo")]
+  user_no: i32,
+  #[serde(rename = "UserName")]
+  user_name: String,
+  #[serde(rename = "AuthKey")]
+  auth_key: String,
+  #[serde(rename = "Banned")]
+  banned: bool,
+
+  #[serde(rename = "ActsMap", skip_serializing_if = "Option::is_none")]
+    acts_map: Option<serde_json::Value>,
+    #[serde(rename = "PagesMap", skip_serializing_if = "Option::is_none")]
+    pages_map: Option<serde_json::Value>,
+
+  session_cookie: Option<String>,
 }
 
 /* const CONFIG: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/config/config.json"));
 
 lazy_static::lazy_static! {
-    static ref CONFIG_JSON: Value = serde_json::from_str(CONFIG).expect("Failed to parse config");
+  static ref CONFIG_JSON: Value = serde_json::from_str(CONFIG).expect("Failed to parse config");
 } */
 
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct FileInfo {
-    path: String,
-    hash: String,
-    size: u64,
-    url: String,
+  path: String,
+  hash: String,
+  size: u64,
+  url: String,
 }
 
 #[derive(Clone, Serialize)]
 struct ProgressPayload {
-    file_name: String,
-    progress: f64,
-    speed: f64,
-    downloaded_bytes: u64,
-    total_bytes: u64,
-    total_files: usize,
-    elapsed_time: f64,
-    current_file_index: usize,
+  file_name: String,
+  progress: f64,
+  speed: f64,
+  downloaded_bytes: u64,
+  total_bytes: u64,
+  total_files: usize,
+  elapsed_time: f64,
+  current_file_index: usize,
 }
 
 #[derive(Clone, Serialize)]
 struct FileCheckProgress {
-    current_file: String,
-    progress: f64,
-    current_count: usize,
-    total_files: usize,
-    elapsed_time: f64,
-    files_to_update: usize,
+  current_file: String,
+  progress: f64,
+  current_count: usize,
+  total_files: usize,
+  elapsed_time: f64,
+  files_to_update: usize,
 }
 
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct CachedFileInfo {
-    hash: String,
-    last_modified: SystemTime,
+  hash: String,
+  last_modified: SystemTime,
 }
 
 struct GameState {
-    status_receiver: Arc<Mutex<watch::Receiver<bool>>>,
-    is_launching: Arc<Mutex<bool>>,
+  status_receiver: Arc<Mutex<watch::Receiver<bool>>>,
+  is_launching: Arc<Mutex<bool>>,
 }
 
 
@@ -215,840 +232,860 @@ struct GameState {
 
 
 lazy_static! {
-    static ref HASH_CACHE: Mutex<HashMap<String, CachedFileInfo>> = Mutex::new(HashMap::new());
+  static ref HASH_CACHE: Mutex<HashMap<String, CachedFileInfo>> = Mutex::new(HashMap::new());
 }
 
 
 /* fn get_config_value(key: &str) -> String {
-    CONFIG_JSON[key].as_str().expect(&format!("{} must be set in config.json", key)).to_string()
+  CONFIG_JSON[key].as_str().expect(&format!("{} must be set in config.json", key)).to_string()
 } */
 
 fn is_ignored(path: &Path, game_path: &Path, ignored_paths: &HashSet<&str>) -> bool {
-    let relative_path = path.strip_prefix(game_path).unwrap().to_str().unwrap().replace("\\", "/");
+  let relative_path = path.strip_prefix(game_path).unwrap().to_str().unwrap().replace("\\", "/");
 
-    // Ignore files at the root
-    if relative_path.chars().filter(|&c| c == '/').count() == 0 {
-        return true;
+  // Ignore files at the root
+  if relative_path.chars().filter(|&c| c == '/').count() == 0 {
+    return true;
+  }
+
+  // Check if the path is in the list of ignored paths
+  for ignored_path in ignored_paths {
+    if relative_path.starts_with(ignored_path) {
+      return true;
     }
+  }
 
-    // Check if the path is in the list of ignored paths
-    for ignored_path in ignored_paths {
-        if relative_path.starts_with(ignored_path) {
-            return true;
-        }
-    }
-
-    false
+  false
 }
 
 async fn get_server_hash_file() -> Result<serde_json::Value, String> {
-    let client = reqwest::Client::new();
-    let res = client
-        .get(get_hash_file_url())
-        .send().await
-        .map_err(|e| e.to_string())?;
-    let json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
-    Ok(json)
+  let client = reqwest::Client::new();
+  let res = client
+    .get(get_hash_file_url())
+    .send().await
+    .map_err(|e| e.to_string())?;
+  let json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+  Ok(json)
 }
 
 
 fn calculate_file_hash<P: AsRef<Path>>(path: P) -> Result<String, String> {
-    let mut file = File::open(path).map_err(|e| format!("Failed to open file: {}", e))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0; 1024];
+  let mut file = File::open(path).map_err(|e| format!("Failed to open file: {}", e))?;
+  let mut hasher = Sha256::new();
+  let mut buffer = [0; 1024];
 
-    loop {
-        let bytes_read = file.read(&mut buffer).map_err(|e| format!("Failed to read file: {}", e))?;
-        if bytes_read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..bytes_read]);
+  loop {
+    let bytes_read = file.read(&mut buffer).map_err(|e| format!("Failed to read file: {}", e))?;
+    if bytes_read == 0 {
+      break;
     }
+    hasher.update(&buffer[..bytes_read]);
+  }
 
-    let result = hasher.finalize();
-    Ok(format!("{:x}", result))
+  let result = hasher.finalize();
+  Ok(format!("{:x}", result))
 }
 
 fn get_cache_file_path() -> Result<PathBuf, String> {
-    let mut path = std::env::current_exe().map_err(|e| e.to_string())?;
-    path.pop();
-    path.push("file_cache.json");
-    Ok(path)
+  let mut path = std::env::current_exe().map_err(|e| e.to_string())?;
+  path.pop();
+  path.push("file_cache.json");
+  Ok(path)
 }
 
 fn save_cache_to_disk(cache: &HashMap<String, CachedFileInfo>) -> Result<(), String> {
-    let cache_path = get_cache_file_path()?;
-    let serialized = serde_json::to_string(cache).map_err(|e| e.to_string())?;
-    let mut file = File::create(cache_path).map_err(|e| e.to_string())?;
-    file.write_all(serialized.as_bytes()).map_err(|e| e.to_string())?;
-    Ok(())
+  let cache_path = get_cache_file_path()?;
+  let serialized = serde_json::to_string(cache).map_err(|e| e.to_string())?;
+  let mut file = File::create(cache_path).map_err(|e| e.to_string())?;
+  file.write_all(serialized.as_bytes()).map_err(|e| e.to_string())?;
+  Ok(())
 }
 
 fn load_cache_from_disk() -> Result<HashMap<String, CachedFileInfo>, String> {
-    let cache_path = get_cache_file_path()?;
-    let mut file = File::open(cache_path).map_err(|e| e.to_string())?;
-    let mut contents = String::new();
-    file.read_to_string(&mut contents).map_err(|e| e.to_string())?;
-    let cache: HashMap<String, CachedFileInfo> = serde_json::from_str(&contents).map_err(|e| e.to_string())?;
-    Ok(cache)
+  let cache_path = get_cache_file_path()?;
+  let mut file = File::open(cache_path).map_err(|e| e.to_string())?;
+  let mut contents = String::new();
+  file.read_to_string(&mut contents).map_err(|e| e.to_string())?;
+  let cache: HashMap<String, CachedFileInfo> = serde_json::from_str(&contents).map_err(|e| e.to_string())?;
+  Ok(cache)
 }
 
 
 fn get_hash_file_url() -> String {
-    get_config_value("HASH_FILE_URL")
+  get_config_value("HASH_FILE_URL")
 }
 
 fn get_files_server_url() -> String {
-    get_config_value("FILE_SERVER_URL")
+  get_config_value("FILE_SERVER_URL")
 }
 
 fn find_config_file() -> Option<PathBuf> {
-    let current_dir = env::current_dir().ok()?;
-    let config_in_current = current_dir.join("tera_config.ini");
-    if config_in_current.exists() {
-        return Some(config_in_current);
-    }
+  let current_dir = env::current_dir().ok()?;
+  let config_in_current = current_dir.join("tera_config.ini");
+  if config_in_current.exists() {
+    return Some(config_in_current);
+  }
 
-    let parent_dir = current_dir.parent()?;
-    let config_in_parent = parent_dir.join("tera_config.ini");
-    if config_in_parent.exists() {
-        return Some(config_in_parent);
-    }
+  let parent_dir = current_dir.parent()?;
+  let config_in_parent = parent_dir.join("tera_config.ini");
+  if config_in_parent.exists() {
+    return Some(config_in_parent);
+  }
 
-    if let Ok(exe_path) = env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            let config_in_exe_dir = exe_dir.join("tera_config.ini");
-            if config_in_exe_dir.exists() {
-                return Some(config_in_exe_dir);
-            }
-        }
+  if let Ok(exe_path) = env::current_exe() {
+    if let Some(exe_dir) = exe_path.parent() {
+      let config_in_exe_dir = exe_dir.join("tera_config.ini");
+      if config_in_exe_dir.exists() {
+        return Some(config_in_exe_dir);
+      }
     }
+  }
 
-    None
+  None
 }
 
 fn load_config() -> Result<(PathBuf, String), String> {
-    let config_path = find_config_file().ok_or("Config file not found")?;
-    let conf = Ini::load_from_file(&config_path).map_err(|e|
-        format!("Failed to load config: {}", e)
-    )?;
+  let config_path = find_config_file().ok_or("Config file not found")?;
+  let conf = Ini::load_from_file(&config_path).map_err(|e|
+    format!("Failed to load config: {}", e)
+  )?;
 
-    let section = conf.section(Some("game")).ok_or("Game section not found in config")?;
+  let section = conf.section(Some("game")).ok_or("Game section not found in config")?;
 
-    let game_path = section.get("path").ok_or("Game path not found in config")?;
+  let game_path = section.get("path").ok_or("Game path not found in config")?;
 
-    let game_path = PathBuf::from(game_path);
+  let game_path = PathBuf::from(game_path);
 
-    let game_lang = section.get("lang").ok_or("Game language not found in config")?.to_string();
+  let game_lang = section.get("lang").ok_or("Game language not found in config")?.to_string();
 
-    Ok((game_path, game_lang))
+  Ok((game_path, game_lang))
 }
 
 /* fn save_config(game_path: &Path, game_lang: &str) -> Result<(), String> {
-    let config_path = find_config_file().ok_or("Config file not found")?;
-    let mut conf = Ini::new();
+  let config_path = find_config_file().ok_or("Config file not found")?;
+  let mut conf = Ini::new();
 
-    conf.with_section(Some("game")).set("path", game_path.to_str().ok_or("Invalid game path")?);
-    conf.with_section(Some("game")).set("lang", game_lang);
+  conf.with_section(Some("game")).set("path", game_path.to_str().ok_or("Invalid game path")?);
+  conf.with_section(Some("game")).set("lang", game_lang);
 
-    let mut file = std::fs::File
-        ::create(&config_path)
-        .map_err(|e| format!("Failed to create config file: {}", e))?;
+  let mut file = std::fs::File
+    ::create(&config_path)
+    .map_err(|e| format!("Failed to create config file: {}", e))?;
 
-    conf.write_to(&mut file).map_err(|e| format!("Failed to write config: {}", e))?;
+  conf.write_to(&mut file).map_err(|e| format!("Failed to write config: {}", e))?;
 
-    Ok(())
+  Ok(())
 } */
 
 async fn get_maintenance_status() -> Result<MaintenanceResponse, String> { 
-    let client = reqwest::Client::new();
-    let base_url = &*LAUNCHER_BASE_URL; 
-    let maintenance_url = format!("{}/launcher/GetMaintenanceStatusAction", base_url);
+  let client = reqwest::Client::new();
+  let base_url = &*LAUNCHER_BASE_URL; 
+  let maintenance_url = format!("{}/launcher/GetMaintenanceStatusAction", base_url);
 
-    let res = client
-        .get(&maintenance_url)
-        .send().await
-        .map_err(|e| format!("Failed to connect to maintenance server: {}", e))?;
+  let res = client
+    .get(&maintenance_url)
+    .send().await
+    .map_err(|e| format!("Failed to connect to maintenance server: {}", e))?;
 
-    if !res.status().is_success() {
-        return Err(format!("Maintenance check request failed with status: {}", res.status()));
-    }
+  if !res.status().is_success() {
+    return Err(format!("Maintenance check request failed with status: {}", res.status()));
+  }
 
-    let maintenance_body: MaintenanceResponse = res
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse maintenance response: {}", e))?;
+  let maintenance_body: MaintenanceResponse = res
+    .json()
+    .await
+    .map_err(|e| format!("Failed to parse maintenance response: {}", e))?;
 
-    if !maintenance_body.return_value {
-        return Err(format!("Maintenance check API error: {}", maintenance_body.msg));
-    }
+  if !maintenance_body.return_value {
+    return Err(format!("Maintenance check API error: {}", maintenance_body.msg));
+  }
 
-    Ok(maintenance_body)
+  Ok(maintenance_body)
 }
 
 #[tauri::command]
 async fn check_maintenance_and_notify(window: tauri::Window) -> Result<bool, String> {
-    match get_maintenance_status().await {
-        Ok(response) => {
-            let is_maintenance = response.start_time.is_some() || response.end_time.is_some();
+  match get_maintenance_status().await {
+    Ok(response) => {
+      let is_maintenance = response.start_time.is_some() || response.end_time.is_some();
 
-            if is_maintenance {
-                // Emit the event with full maintenance details for the modal
-                let payload = serde_json::to_value(&response)
-                    .unwrap_or(json!({"msg": "Active maintenance"}));
+      if is_maintenance {
+        // Emit the event with full maintenance details for the modal
+        let payload = serde_json::to_value(&response)
+          .unwrap_or(json!({"msg": "Active maintenance"}));
 
-                if let Err(e) = window.emit("maintenance_active", payload) {
-                    error!("Failed to emit maintenance_active event: {:?}", e);
-                }
-            }
-
-            // Return 'true' if maintenance is active, 'false' otherwise
-            Ok(is_maintenance)
+        if let Err(e) = window.emit("maintenance_active", payload) {
+          error!("Failed to emit maintenance_active event: {:?}", e);
         }
-        Err(e) => {
-            error!("Error checking maintenance status: {:?}", e);
-            // Return a specific error so the frontend can handle it as a network issue
-            Err(format!("ERROR_NETWORK_CHECK: {}", e))
-        }
+      }
+
+      // Return 'true' if maintenance is active, 'false' otherwise
+      Ok(is_maintenance)
     }
+    Err(e) => {
+      error!("Error checking maintenance status: {:?}", e);
+      // Return a specific error so the frontend can handle it as a network issue
+      Err(format!("ERROR_NETWORK_CHECK: {}", e))
+    }
+  }
 }
 
 
 #[tauri::command]
 async fn generate_hash_file(window: tauri::Window) -> Result<String, String> {
-    let start_time = Instant::now();
+  let start_time = Instant::now();
 
-    let game_path = get_game_path().map_err(|e| e.to_string())?;
-    info!("Game path: {:?}", game_path);
-    let output_path = game_path.join("hash-file.json");
-    info!("Output path: {:?}", output_path);
+  let game_path = get_game_path().map_err(|e| e.to_string())?;
+  info!("Game path: {:?}", game_path);
+  let output_path = game_path.join("hash-file.json");
+  info!("Output path: {:?}", output_path);
 
-    // List of files and directories to ignore
-    let ignored_paths: HashSet<&str> = [
-        "$Patch",
-        "Binaries/cookies.dat",
-        "S1Game/GuildFlagUpload",
-        "S1Game/GuildLogoUpload",
-        "S1Game/ImageCache",
-        "S1Game/Logs",
-        "S1Game/Screenshots",
-        "S1Game/Config/S1Engine.ini",
-        "S1Game/Config/S1Game.ini",
-        "S1Game/Config/S1Input.ini",
-        "S1Game/Config/S1Lightmass.ini",
-        "S1Game/Config/S1Option.ini",
-        "S1Game/Config/S1SystemSettings.ini",
-        "S1Game/Config/S1TBASettings.ini",
-        "S1Game/Config/S1UI.ini",
-        "Launcher.exe",
-        "local.db",
-        "version.ini",
-        "unins000.dat",
-        "unins000.exe",
-    ].iter().cloned().collect();
+  // List of files and directories to ignore
+  let ignored_paths: HashSet<&str> = [
+    "$Patch",
+    "Binaries/cookies.dat",
+    "S1Game/GuildFlagUpload",
+    "S1Game/GuildLogoUpload",
+    "S1Game/ImageCache",
+    "S1Game/Logs",
+    "S1Game/Screenshots",
+    "S1Game/Config/S1Engine.ini",
+    "S1Game/Config/S1Game.ini",
+    "S1Game/Config/S1Input.ini",
+    "S1Game/Config/S1Lightmass.ini",
+    "S1Game/Config/S1Option.ini",
+    "S1Game/Config/S1SystemSettings.ini",
+    "S1Game/Config/S1TBASettings.ini",
+    "S1Game/Config/S1UI.ini",
+    "Launcher.exe",
+    "local.db",
+    "version.ini",
+    "unins000.dat",
+    "unins000.exe",
+  ].iter().cloned().collect();
 
-    let total_files = WalkDir::new(&game_path)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-        .filter(|e| !is_ignored(e.path(), &game_path, &ignored_paths))
-        .count();
-    info!("Total files to process: {}", total_files);
+  let total_files = WalkDir::new(&game_path)
+    .into_iter()
+    .filter_map(|e| e.ok())
+    .filter(|e| e.file_type().is_file())
+    .filter(|e| !is_ignored(e.path(), &game_path, &ignored_paths))
+    .count();
+  info!("Total files to process: {}", total_files);
 
-    let progress_bar = ProgressBar::new(total_files as u64);
-    let progress_style = ProgressStyle::default_bar()
-        .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} {msg}")
-        .map_err(|e| e.to_string())?
-        .progress_chars("##-");
-    progress_bar.set_style(progress_style);
+  let progress_bar = ProgressBar::new(total_files as u64);
+  let progress_style = ProgressStyle::default_bar()
+    .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} {msg}")
+    .map_err(|e| e.to_string())?
+    .progress_chars("##-");
+  progress_bar.set_style(progress_style);
 
-    let processed_files = AtomicU64::new(0);
-    let total_size = AtomicU64::new(0);
-    let files = Arc::new(Mutex::new(Vec::new()));
+  let processed_files = AtomicU64::new(0);
+  let total_size = AtomicU64::new(0);
+  let files = Arc::new(Mutex::new(Vec::new()));
 
-    let result: Result<(), String> = WalkDir::new(&game_path)
-        .into_iter()
-        .par_bridge()
-        .try_for_each(|entry| -> Result<(), String> {
-            let entry = entry.map_err(|e| e.to_string())?;
-            let path = entry.path();
-            if path.is_file() && !is_ignored(path, &game_path, &ignored_paths) {
-                let relative_path = path.strip_prefix(&game_path).unwrap().to_str().unwrap().replace("\\", "/");
-                info!("Processing file: {}", relative_path);
+  let result: Result<(), String> = WalkDir::new(&game_path)
+    .into_iter()
+    .par_bridge()
+    .try_for_each(|entry| -> Result<(), String> {
+      let entry = entry.map_err(|e| e.to_string())?;
+      let path = entry.path();
+      if path.is_file() && !is_ignored(path, &game_path, &ignored_paths) {
+        let relative_path = path.strip_prefix(&game_path).unwrap().to_str().unwrap().replace("\\", "/");
+        info!("Processing file: {}", relative_path);
 
-                let contents = std::fs::read(path).map_err(|e| e.to_string())?;
-                let mut hasher = Sha256::new();
-                hasher.update(&contents);
-                let hash = format!("{:x}", hasher.finalize());
-                let size = contents.len() as u64;
-                let file_server_url = get_config_value("FILE_SERVER_URL");
-                let url = format!("{}/files/{}", file_server_url, relative_path);
+        let contents = std::fs::read(path).map_err(|e| e.to_string())?;
+        let mut hasher = Sha256::new();
+        hasher.update(&contents);
+        let hash = format!("{:x}", hasher.finalize());
+        let size = contents.len() as u64;
+        let file_server_url = get_config_value("FILE_SERVER_URL");
+        let url = format!("{}/files/{}", file_server_url, relative_path);
 
-                files.blocking_lock().push(FileInfo {
-                    path: relative_path.clone(),
-                    hash,
-                    size,
-                    url,
-                });
-
-                total_size.fetch_add(size, Ordering::Relaxed);
-                let current_processed = processed_files.fetch_add(1, Ordering::Relaxed) + 1;
-                progress_bar.set_position(current_processed);
-
-                let progress = (current_processed as f64 / total_files as f64) * 100.0;
-                window.emit("hash_file_progress", json!({
-                    "current_file": relative_path,
-                    "progress": progress,
-                    "processed_files": current_processed,
-                    "total_files": total_files,
-                    "total_size": total_size.load(Ordering::Relaxed)
-                })).map_err(|e| e.to_string())?;
-            }
-            Ok(())
+        files.blocking_lock().push(FileInfo {
+          path: relative_path.clone(),
+          hash,
+          size,
+          url,
         });
 
-    if let Err(e) = result {
-        error!("Error during file processing: {:?}", e);
-        return Err(e);
-    }
+        total_size.fetch_add(size, Ordering::Relaxed);
+        let current_processed = processed_files.fetch_add(1, Ordering::Relaxed) + 1;
+        progress_bar.set_position(current_processed);
 
-    progress_bar.finish_with_message("File processing completed");
+        let progress = (current_processed as f64 / total_files as f64) * 100.0;
+        window.emit("hash_file_progress", json!({
+          "current_file": relative_path,
+          "progress": progress,
+          "processed_files": current_processed,
+          "total_files": total_files,
+          "total_size": total_size.load(Ordering::Relaxed)
+        })).map_err(|e| e.to_string())?;
+      }
+      Ok(())
+    });
 
-    info!("Generating JSON");
-    let json = serde_json::to_string(&json!({
-        "files": files.lock().await.clone()
-    })).map_err(|e| e.to_string())?;
+  if let Err(e) = result {
+    error!("Error during file processing: {:?}", e);
+    return Err(e);
+  }
 
-    info!("Writing hash file");
-    let mut file = File::create(&output_path).map_err(|e| e.to_string())?;
-    file.write_all(json.as_bytes()).map_err(|e| e.to_string())?;
+  progress_bar.finish_with_message("File processing completed");
 
-    let duration = start_time.elapsed();
-    let total_processed = processed_files.load(Ordering::Relaxed);
-    let total_size = total_size.load(Ordering::Relaxed);
-    info!("Hash file generation completed in {:?}", duration);
-    info!("Total files processed: {}", total_processed);
-    info!("Total size: {} bytes", total_size);
+  info!("Generating JSON");
+  let json = serde_json::to_string(&json!({
+    "files": files.lock().await.clone()
+  })).map_err(|e| e.to_string())?;
 
-    Ok(format!("Hash file generated successfully. Processed {} files with a total size of {} bytes in {:?}", total_processed, total_size, duration))
+  info!("Writing hash file");
+  let mut file = File::create(&output_path).map_err(|e| e.to_string())?;
+  file.write_all(json.as_bytes()).map_err(|e| e.to_string())?;
+
+  let duration = start_time.elapsed();
+  let total_processed = processed_files.load(Ordering::Relaxed);
+  let total_size = total_size.load(Ordering::Relaxed);
+  info!("Hash file generation completed in {:?}", duration);
+  info!("Total files processed: {}", total_processed);
+  info!("Total size: {} bytes", total_size);
+
+  Ok(format!("Hash file generated successfully. Processed {} files with a total size of {} bytes in {:?}", total_processed, total_size, duration))
 }
 
 
 #[tauri::command]
 async fn select_game_folder() -> Result<String, String> {
-    let (tx, mut rx) = mpsc::channel(1);
+  let (tx, mut rx) = mpsc::channel(1);
 
-    FileDialogBuilder::new()
-        .set_title("Select Tera Game Folder")
-        .set_directory("/")
-        .pick_folder(move |folder_path| {
-            if let Some(path) = folder_path {
-                let _ = tx.try_send(path);
-            }
-        });
+  FileDialogBuilder::new()
+    .set_title("Select Tera Game Folder")
+    .set_directory("/")
+    .pick_folder(move |folder_path| {
+      if let Some(path) = folder_path {
+        let _ = tx.try_send(path);
+      }
+    });
 
-    match rx.recv().await {
-        Some(path) => Ok(path.to_string_lossy().into_owned()),
-        None => Err("Folder selection cancelled or failed".into()),
-    }
+  match rx.recv().await {
+    Some(path) => Ok(path.to_string_lossy().into_owned()),
+    None => Err("Folder selection cancelled or failed".into()),
+  }
 }
 
 
 fn get_game_path() -> Result<PathBuf, String> {
-    let (game_path, _) = load_config()?;
-    Ok(game_path)
+  let (game_path, _) = load_config()?;
+  Ok(game_path)
 }
 
 
 #[tauri::command]
 fn save_game_path_to_config(path: String) -> Result<(), String> {
-    let config_path = find_config_file().ok_or("Config file not found")?;
-    let mut conf = Ini::load_from_file(&config_path).map_err(|e|
-        format!("Failed to load config: {}", e)
-    )?;
+  let config_path = find_config_file().ok_or("Config file not found")?;
+  let mut conf = Ini::load_from_file(&config_path).map_err(|e|
+    format!("Failed to load config: {}", e)
+  )?;
 
-    conf.with_section(Some("game")).set("path", &path);
+  conf.with_section(Some("game")).set("path", &path);
 
-    conf.write_to_file(&config_path).map_err(|e| format!("Failed to write config: {}", e))?;
+  conf.write_to_file(&config_path).map_err(|e| format!("Failed to write config: {}", e))?;
 
-    Ok(())
+  Ok(())
 }
 
 #[tauri::command]
 fn get_game_path_from_config() -> Result<String, String> {
-    match get_game_path() {
-        Ok(game_path) => game_path
-            .to_str()
-            .ok_or_else(|| "Invalid UTF-8 in game path".to_string())
-            .map(|s| s.to_string()),
-        Err(e) => {
-            if e.contains("Config file not found") {
-                Err("tera_config.ini is missing".to_string())
-            } else {
-                Err(e)
-            }
-        }
+  match get_game_path() {
+    Ok(game_path) => game_path
+      .to_str()
+      .ok_or_else(|| "Invalid UTF-8 in game path".to_string())
+      .map(|s| s.to_string()),
+    Err(e) => {
+      if e.contains("Config file not found") {
+        Err("tera_config.ini is missing".to_string())
+      } else {
+        Err(e)
+      }
     }
+  }
 }
 
 #[tauri::command]
 async fn check_update_required(window: tauri::Window) -> Result<bool, String> {
-    match get_files_to_update(window).await {
-        Ok(files) => Ok(!files.is_empty()),
-        Err(e) => Err(e),
-    }
+  match get_files_to_update(window).await {
+    Ok(files) => Ok(!files.is_empty()),
+    Err(e) => Err(e),
+  }
 }
 
 #[tauri::command]
 async fn update_file(
-    app_handle: tauri::AppHandle,
-    window: tauri::Window,
-    file_info: FileInfo,
-    total_files: usize,
-    current_file_index: usize,
-    total_size: u64,
-    downloaded_size: u64,
+  _app_handle: tauri::AppHandle,
+  window: tauri::Window,
+  file_info: FileInfo,
+  total_files: usize,
+  current_file_index: usize,
+  total_size: u64,
+  downloaded_size: u64,
 ) -> Result<u64, String> {
-    let game_path = get_game_path()?;
-    let file_path = game_path.join(&file_info.path);
+  let game_path = get_game_path()?;
+  let file_path = game_path.join(&file_info.path);
 
-    if let Some(parent) = file_path.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|e| e.to_string())?;
-    }
+  if let Some(parent) = file_path.parent() {
+    tokio::fs::create_dir_all(parent).await.map_err(|e| e.to_string())?;
+  }
 
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .build()
-        .map_err(|e| e.to_string())?;
+  let client = reqwest::Client::builder()
+    .no_proxy()
+    .build()
+    .map_err(|e| e.to_string())?;
 
-    let res = client.get(&file_info.url)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+  let res = client.get(&file_info.url)
+    .send()
+    .await
+    .map_err(|e| e.to_string())?;
 
-    let file_size = res.content_length().unwrap_or(file_info.size);
-    let mut file = tokio::fs::File::create(&file_path).await.map_err(|e| e.to_string())?;
-    let mut downloaded: u64 = 0;
-    let mut stream = res.bytes_stream();
-    let start_time = Instant::now();
-    let mut last_update = Instant::now();
+  let file_size = res.content_length().unwrap_or(file_info.size);
+  let mut file = tokio::fs::File::create(&file_path).await.map_err(|e| e.to_string())?;
+  let mut downloaded: u64 = 0;
+  let mut stream = res.bytes_stream();
+  let start_time = Instant::now();
+  let mut last_update = Instant::now();
 
-    println!("Downloading file: {}", file_info.path);
+  println!("Downloading file: {}", file_info.path);
 
-    while let Some(chunk_result) = stream.next().await {
-        let chunk = chunk_result.map_err(|e| e.to_string())?;
-        file.write_all(&chunk).await.map_err(|e| e.to_string())?;
-        downloaded += chunk.len() as u64;
+  while let Some(chunk_result) = stream.next().await {
+    let chunk = chunk_result.map_err(|e| e.to_string())?;
+    file.write_all(&chunk).await.map_err(|e| e.to_string())?;
+    downloaded += chunk.len() as u64;
 
-        let now = Instant::now();
-        if now.duration_since(last_update) >= Duration::from_millis(100) || downloaded == file_size {
-            let elapsed = now.duration_since(start_time);
-            let speed = if elapsed.as_secs() > 0 { downloaded / elapsed.as_secs() } else { downloaded };
+    let now = Instant::now();
+    if now.duration_since(last_update) >= Duration::from_millis(100) || downloaded == file_size {
+      let elapsed = now.duration_since(start_time);
+      let speed = if elapsed.as_secs() > 0 { downloaded / elapsed.as_secs() } else { downloaded };
 
-            let total_downloaded = downloaded_size + downloaded;
-            let progress_payload = ProgressPayload {
-                file_name: file_info.path.clone(),
-                progress: (downloaded as f64 / file_size as f64) * 100.0,
-                speed: speed as f64,
-                downloaded_bytes: total_downloaded,
-                total_bytes: total_size,
-                total_files,
-                elapsed_time: elapsed.as_secs_f64(),
-                current_file_index,
-            };
-
-            println!("Current file: {}, Download speed: {}/s, Progress: {:.2}%",
-                     file_info.path, format_bytes(speed), progress_payload.progress);
-
-            if let Err(e) = window.emit("download_progress", &progress_payload) {
-                println!("Failed to emit download_progress event: {}", e);
-            }
-            last_update = now;
-        }
-
-        tokio::time::sleep(Duration::from_millis(1)).await;
-    }
-
-    file.flush().await.map_err(|e| e.to_string())?;
-
-    let downloaded_hash = tokio::task::spawn_blocking(move || calculate_file_hash(&file_path)).await.map_err(|e| e.to_string())??;
-    if downloaded_hash != file_info.hash {
-        return Err(format!("Hash mismatch for file: {}", file_info.path));
-    }
-
-    // Emit a final event for this file
-    let final_progress_payload = ProgressPayload {
+      let total_downloaded = downloaded_size + downloaded;
+      let progress_payload = ProgressPayload {
         file_name: file_info.path.clone(),
-        progress: 100.0,
-        speed: 0.0,
-        downloaded_bytes: downloaded_size + downloaded,
+        progress: (downloaded as f64 / file_size as f64) * 100.0,
+        speed: speed as f64,
+        downloaded_bytes: total_downloaded,
         total_bytes: total_size,
         total_files,
-        elapsed_time: start_time.elapsed().as_secs_f64(),
+        elapsed_time: elapsed.as_secs_f64(),
         current_file_index,
-    };
-    if let Err(e) = window.emit("download_progress", &final_progress_payload) {
-        println!("Failed to emit final download_progress event: {}", e);
+      };
+
+      println!("Current file: {}, Download speed: {}/s, Progress: {:.2}%",
+          file_info.path, format_bytes(speed), progress_payload.progress);
+
+      if let Err(e) = window.emit("download_progress", &progress_payload) {
+        println!("Failed to emit download_progress event: {}", e);
+      }
+      last_update = now;
     }
 
-    println!("File download completed: {}", file_info.path);
+    tokio::time::sleep(Duration::from_millis(1)).await;
+  }
 
-    Ok(downloaded)
+  file.flush().await.map_err(|e| e.to_string())?;
+
+  let downloaded_hash = tokio::task::spawn_blocking(move || calculate_file_hash(&file_path)).await.map_err(|e| e.to_string())??;
+  if downloaded_hash != file_info.hash {
+    return Err(format!("Hash mismatch for file: {}", file_info.path));
+  }
+
+  // Emit a final event for this file
+  let final_progress_payload = ProgressPayload {
+    file_name: file_info.path.clone(),
+    progress: 100.0,
+    speed: 0.0,
+    downloaded_bytes: downloaded_size + downloaded,
+    total_bytes: total_size,
+    total_files,
+    elapsed_time: start_time.elapsed().as_secs_f64(),
+    current_file_index,
+  };
+  if let Err(e) = window.emit("download_progress", &final_progress_payload) {
+    println!("Failed to emit final download_progress event: {}", e);
+  }
+
+  println!("File download completed: {}", file_info.path);
+
+  Ok(downloaded)
 }
 
 fn format_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
-    let mut size = bytes as f64;
-    let mut unit_index = 0;
+  const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+  let mut size = bytes as f64;
+  let mut unit_index = 0;
 
-    while size >= 1024.0 && unit_index < UNITS.len() - 1 {
-        size /= 1024.0;
-        unit_index += 1;
-    }
+  while size >= 1024.0 && unit_index < UNITS.len() - 1 {
+    size /= 1024.0;
+    unit_index += 1;
+  }
 
-    format!("{:.2} {}", size, UNITS[unit_index])
+  format!("{:.2} {}", size, UNITS[unit_index])
 }
 
 #[tauri::command]
 async fn download_all_files(
-    app_handle: tauri::AppHandle,
-    window: tauri::Window,
-    files_to_update: Vec<FileInfo>
+  app_handle: tauri::AppHandle,
+  window: tauri::Window,
+  files_to_update: Vec<FileInfo>
 ) -> Result<Vec<u64>, String> {
-    let total_files = files_to_update.len();
-    let total_size: u64 = files_to_update.iter().map(|f| f.size).sum();
+  let total_files = files_to_update.len();
+  let total_size: u64 = files_to_update.iter().map(|f| f.size).sum();
 
-    if total_files == 0 {
-        println!("No files to download");
-        if let Err(e) = window.emit("download_complete", ()) {
-            eprintln!("Failed to emit download_complete event: {}", e);
-        }
-        return Ok(vec![]);
-    }
-
-    let mut downloaded_sizes = Vec::with_capacity(total_files);
-    let mut downloaded_size: u64 = 0;
-
-    for (index, file_info) in files_to_update.into_iter().enumerate() {
-        let file_size = update_file(
-            app_handle.clone(),
-            window.clone(),
-            file_info,
-            total_files,
-            index + 1,
-            total_size,
-            downloaded_size
-        ).await?;
-
-        downloaded_size += file_size;
-        downloaded_sizes.push(file_size);
-    }
-
-    println!("Download complete for {} file(s)", total_files);
+  if total_files == 0 {
+    println!("No files to download");
     if let Err(e) = window.emit("download_complete", ()) {
-        eprintln!("Failed to emit download_complete event: {}", e);
+      eprintln!("Failed to emit download_complete event: {}", e);
     }
+    return Ok(vec![]);
+  }
 
-    Ok(downloaded_sizes)
+  let mut downloaded_sizes = Vec::with_capacity(total_files);
+  let mut downloaded_size: u64 = 0;
+
+  for (index, file_info) in files_to_update.into_iter().enumerate() {
+    let file_size = update_file(
+      app_handle.clone(),
+      window.clone(),
+      file_info,
+      total_files,
+      index + 1,
+      total_size,
+      downloaded_size
+    ).await?;
+
+    downloaded_size += file_size;
+    downloaded_sizes.push(file_size);
+  }
+
+  println!("Download complete for {} file(s)", total_files);
+  if let Err(e) = window.emit("download_complete", ()) {
+    eprintln!("Failed to emit download_complete event: {}", e);
+  }
+
+  Ok(downloaded_sizes)
 }
 
 
 #[tauri::command]
 async fn get_files_to_update(window: tauri::Window) -> Result<Vec<FileInfo>, String> {
-    println!("Starting get_files_to_update");
+  println!("Starting get_files_to_update");
 
-    let start_time = Instant::now();
-    let server_hash_file = get_server_hash_file().await?;
+  let start_time = Instant::now();
+  let server_hash_file = get_server_hash_file().await?;
 
-    // Get the path to the game folder, which is the folder that contains the Tera game
-    // files. This is the folder that we will be comparing with the server hash file
-    // to determine which files need to be updated.
-    let local_game_path = get_game_path()?;
-    println!("Local game path: {:?}", local_game_path);
+  // Get the path to the game folder, which is the folder that contains the Tera game
+  // files. This is the folder that we will be comparing with the server hash file
+  // to determine which files need to be updated.
+  let local_game_path = get_game_path()?;
+  println!("Local game path: {:?}", local_game_path);
 
-    println!("Attempting to read server hash file");
-    let files = server_hash_file["files"].as_array().ok_or("Invalid server hash file format")?;
-    println!("Server hash file parsed, {} files found", files.len());
+  println!("Attempting to read server hash file");
+  let files = server_hash_file["files"].as_array().ok_or("Invalid server hash file format")?;
+  println!("Server hash file parsed, {} files found", files.len());
 
-    println!("Starting file comparison");
-    let _cache = load_cache_from_disk().unwrap_or_else(|_| HashMap::new());
-    let cache = Arc::new(RwLock::new(_cache));
+  println!("Starting file comparison");
+  let _cache = load_cache_from_disk().unwrap_or_else(|_| HashMap::new());
+  let cache = Arc::new(RwLock::new(_cache));
 
-    let progress_bar = ProgressBar::new(files.len() as u64);
-    progress_bar.set_style(ProgressStyle::default_bar()
-        .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} {msg}")
-        .unwrap()
-        .progress_chars("##-"));
+  let progress_bar = ProgressBar::new(files.len() as u64);
+  progress_bar.set_style(ProgressStyle::default_bar()
+    .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} {msg}")
+    .unwrap()
+    .progress_chars("##-"));
 
-    let processed_count = Arc::new(AtomicUsize::new(0));
-    let files_to_update_count = Arc::new(AtomicUsize::new(0));
-    let total_size = Arc::new(AtomicU64::new(0));
+  let processed_count = Arc::new(AtomicUsize::new(0));
+  let files_to_update_count = Arc::new(AtomicUsize::new(0));
+  let total_size = Arc::new(AtomicU64::new(0));
 
-    let files_to_update: Vec<FileInfo> = files.par_iter().enumerate()
-        .filter_map(|(_index, file_info)| {
-            let path = file_info["path"].as_str().unwrap_or("");
-            let server_hash = file_info["hash"].as_str().unwrap_or("");
-            let size = file_info["size"].as_u64().unwrap_or(0);
-            let url = file_info["url"].as_str().unwrap_or("").to_string();
+  let files_to_update: Vec<FileInfo> = files.par_iter().enumerate()
+    .filter_map(|(_index, file_info)| {
+      let path = file_info["path"].as_str().unwrap_or("");
+      let server_hash = file_info["hash"].as_str().unwrap_or("");
+      let size = file_info["size"].as_u64().unwrap_or(0);
+      let url = file_info["url"].as_str().unwrap_or("").to_string();
 
-            let local_file_path = local_game_path.join(path);
+      let local_file_path = local_game_path.join(path);
 
-            let current_count = processed_count.fetch_add(1, Ordering::SeqCst) + 1;
-            if current_count % 100 == 0 || current_count == files.len() {
-                let progress_payload = FileCheckProgress {
-                    current_file: path.to_string(),
-                    progress: (current_count as f64 / files.len() as f64) * 100.0,
-                    current_count,
-                    total_files: files.len(),
-                    elapsed_time: start_time.elapsed().as_secs_f64(),
-                    files_to_update: files_to_update_count.load(Ordering::SeqCst),
-                };
+      let current_count = processed_count.fetch_add(1, Ordering::SeqCst) + 1;
+      if current_count % 100 == 0 || current_count == files.len() {
+        let progress_payload = FileCheckProgress {
+          current_file: path.to_string(),
+          progress: (current_count as f64 / files.len() as f64) * 100.0,
+          current_count,
+          total_files: files.len(),
+          elapsed_time: start_time.elapsed().as_secs_f64(),
+          files_to_update: files_to_update_count.load(Ordering::SeqCst),
+        };
 
-                let _ = window.emit("file_check_progress", progress_payload)
-                    .map_err(|e| {
-                        println!("Error emitting file_check_progress event: {}", e);
-                        e.to_string()
-                    });
-            }
+        let _ = window.emit("file_check_progress", progress_payload)
+          .map_err(|e| {
+            println!("Error emitting file_check_progress event: {}", e);
+            e.to_string()
+          });
+      }
 
-            progress_bar.inc(1);
+      progress_bar.inc(1);
 
-            if !local_file_path.exists() {
-                files_to_update_count.fetch_add(1, Ordering::SeqCst);
-                total_size.fetch_add(size, Ordering::SeqCst);
-                return Some(FileInfo {
-                    path: path.to_string(),
-                    hash: server_hash.to_string(),
-                    size,
-                    url,
-                });
-            }
+      if !local_file_path.exists() {
+        files_to_update_count.fetch_add(1, Ordering::SeqCst);
+        total_size.fetch_add(size, Ordering::SeqCst);
+        return Some(FileInfo {
+          path: path.to_string(),
+          hash: server_hash.to_string(),
+          size,
+          url,
+        });
+      }
 
-            let metadata = match fs::metadata(&local_file_path) {
-                Ok(m) => m,
-                Err(_) => {
-                    files_to_update_count.fetch_add(1, Ordering::SeqCst);
-                    total_size.fetch_add(size, Ordering::SeqCst);
-                    return Some(FileInfo {
-                        path: path.to_string(),
-                        hash: server_hash.to_string(),
-                        size,
-                        url,
-                    });
-                }
-            };
+      let metadata = match fs::metadata(&local_file_path) {
+        Ok(m) => m,
+        Err(_) => {
+          files_to_update_count.fetch_add(1, Ordering::SeqCst);
+          total_size.fetch_add(size, Ordering::SeqCst);
+          return Some(FileInfo {
+            path: path.to_string(),
+            hash: server_hash.to_string(),
+            size,
+            url,
+          });
+        }
+      };
 
-            let last_modified = metadata.modified().ok();
+      let last_modified = metadata.modified().ok();
 
-            let cache_read = cache.read().unwrap();
-            if let Some(cached_info) = cache_read.get(path) {
-                if let Some(lm) = last_modified {
-                    if cached_info.last_modified == lm && cached_info.hash == server_hash {
-                        return None;
-                    }
-                }
-            }
-            drop(cache_read);
+      let cache_read = cache.read().unwrap();
+      if let Some(cached_info) = cache_read.get(path) {
+        if let Some(lm) = last_modified {
+          if cached_info.last_modified == lm && cached_info.hash == server_hash {
+            return None;
+          }
+        }
+      }
+      drop(cache_read);
 
-            if metadata.len() != size {
-                files_to_update_count.fetch_add(1, Ordering::SeqCst);
-                total_size.fetch_add(size, Ordering::SeqCst);
-                return Some(FileInfo {
-                    path: path.to_string(),
-                    hash: server_hash.to_string(),
-                    size,
-                    url,
-                });
-            }
+      if metadata.len() != size {
+        files_to_update_count.fetch_add(1, Ordering::SeqCst);
+        total_size.fetch_add(size, Ordering::SeqCst);
+        return Some(FileInfo {
+          path: path.to_string(),
+          hash: server_hash.to_string(),
+          size,
+          url,
+        });
+      }
 
-            let local_hash = match calculate_file_hash(&local_file_path) {
-                Ok(hash) => hash,
-                Err(_) => {
-                    files_to_update_count.fetch_add(1, Ordering::SeqCst);
-                    total_size.fetch_add(size, Ordering::SeqCst);
-                    return Some(FileInfo {
-                        path: path.to_string(),
-                        hash: server_hash.to_string(),
-                        size,
-                        url,
-                    });
-                }
-            };
+      let local_hash = match calculate_file_hash(&local_file_path) {
+        Ok(hash) => hash,
+        Err(_) => {
+          files_to_update_count.fetch_add(1, Ordering::SeqCst);
+          total_size.fetch_add(size, Ordering::SeqCst);
+          return Some(FileInfo {
+            path: path.to_string(),
+            hash: server_hash.to_string(),
+            size,
+            url,
+          });
+        }
+      };
 
-            let mut cache_write = cache.write().unwrap();
-            cache_write.insert(path.to_string(), CachedFileInfo {
-                hash: local_hash.clone(),
-                last_modified: last_modified.unwrap_or_else(SystemTime::now),
-            });
-            drop(cache_write);
+      let mut cache_write = cache.write().unwrap();
+      cache_write.insert(path.to_string(), CachedFileInfo {
+        hash: local_hash.clone(),
+        last_modified: last_modified.unwrap_or_else(SystemTime::now),
+      });
+      drop(cache_write);
 
-            if local_hash != server_hash {
-                files_to_update_count.fetch_add(1, Ordering::SeqCst);
-                total_size.fetch_add(size, Ordering::SeqCst);
-                Some(FileInfo {
-                    path: path.to_string(),
-                    hash: server_hash.to_string(),
-                    size,
-                    url,
-                })
-            } else {
-                None
-            }
+      if local_hash != server_hash {
+        files_to_update_count.fetch_add(1, Ordering::SeqCst);
+        total_size.fetch_add(size, Ordering::SeqCst);
+        Some(FileInfo {
+          path: path.to_string(),
+          hash: server_hash.to_string(),
+          size,
+          url,
         })
-        .collect();
+      } else {
+        None
+      }
+    })
+    .collect();
 
-    progress_bar.finish_with_message("File comparison completed");
+  progress_bar.finish_with_message("File comparison completed");
 
-    // Save the updated cache to disk
-    let final_cache = cache.read().unwrap();
-    if let Err(e) = save_cache_to_disk(&*final_cache) {
-        eprintln!("Failed to save cache to disk: {}", e);
-    }
+  // Save the updated cache to disk
+  let final_cache = cache.read().unwrap();
+  if let Err(e) = save_cache_to_disk(&*final_cache) {
+    eprintln!("Failed to save cache to disk: {}", e);
+  }
 
-    let total_time = start_time.elapsed();
-    println!("File comparison completed. Files to update: {}", files_to_update.len());
+  let total_time = start_time.elapsed();
+  println!("File comparison completed. Files to update: {}", files_to_update.len());
 
-    // Emit a final event with complete statistics
-    let _ = window.emit("file_check_completed", json!({
-        "total_files": files.len(),
-        "files_to_update": files_to_update.len(),
-        "total_size": total_size.load(Ordering::SeqCst),
-        "total_time_seconds": total_time.as_secs(),
-        "average_time_per_file_ms": (total_time.as_millis() as f64) / (files.len() as f64)
-    }));
+  // Emit a final event with complete statistics
+  let _ = window.emit("file_check_completed", json!({
+    "total_files": files.len(),
+    "files_to_update": files_to_update.len(),
+    "total_size": total_size.load(Ordering::SeqCst),
+    "total_time_seconds": total_time.as_secs(),
+    "average_time_per_file_ms": (total_time.as_millis() as f64) / (files.len() as f64)
+  }));
 
-    Ok(files_to_update)
+  Ok(files_to_update)
 }
 
 
 #[tauri::command]
 async fn get_game_status(state: tauri::State<'_, GameState>) -> Result<bool, String> {
-    let status = state.status_receiver.lock().await.borrow().clone();
-    let is_launching = *state.is_launching.lock().await;
-    Ok(status || is_launching)
+  let status = state.status_receiver.lock().await.borrow().clone();
+  let is_launching = *state.is_launching.lock().await;
+  Ok(status || is_launching)
 }
 
 #[tauri::command]
 async fn handle_launch_game(
-    app_handle: tauri::AppHandle,
-    state: tauri::State<'_, GameState>
+  app_handle: tauri::AppHandle,
+  state: tauri::State<'_, GameState>
 ) -> Result<String, String> {
-    println!("Total time: {:?}", 3);
-    let mut is_launching = state.is_launching.lock().await;
-    if *is_launching {
-        return Err("Game is already launching".to_string());
+  println!("Total time: {:?}", 3);
+  let mut is_launching = state.is_launching.lock().await;
+  if *is_launching {
+    return Err("Game is already launching".to_string());
+  }
+  *is_launching = true;
+
+  let is_running = *state.status_receiver.lock().await.borrow();
+
+  if is_running {
+    *is_launching = false;
+    return Err("Game is already running".to_string());
+  }
+
+  let auth_info = GLOBAL_AUTH_INFO.read().unwrap();
+  let account_name = auth_info.user_no.to_string();
+  let characters_count = auth_info.character_count.clone();
+  let ticket = auth_info.auth_key.clone();
+  let (game_path, game_lang) = load_config()?;
+
+
+  let acts_map_clone: HashMap<String, String> = {
+      let acts_map_guard = GLOBAL_ACTS_MAP.read().unwrap();
+      acts_map_guard.clone()
+  };
+  let pages_map_clone: HashMap<String, String> = {
+      let pages_map_guard = GLOBAL_PAGES_MAP.read().unwrap();
+      pages_map_guard.clone()
+  };
+  info!("Sending actsMap andpagesMap to teralib...");
+
+  let full_game_path = game_path.join("Binaries").join("Tera.exe");
+
+  if !full_game_path.exists() {
+    *is_launching = false;
+    return Err(format!("Game executable not found at: {:?}", full_game_path));
+  }
+
+  let full_game_path_str = full_game_path
+    .to_str()
+    .ok_or("Invalid path to game executable")?
+    .to_string();
+
+  let app_handle_clone = app_handle.clone();
+  let is_launching_clone = Arc::clone(&state.is_launching);
+
+  tokio::task::spawn(async move {
+    // Emit the game_status_changed event at the start of the launch
+    if let Err(e) = app_handle_clone.emit_all("game_status_changed", true) {
+      error!("Failed to emit game_status_changed event: {:?}", e);
     }
-    *is_launching = true;
 
-    let is_running = *state.status_receiver.lock().await.borrow();
-
-    if is_running {
-        *is_launching = false;
-        return Err("Game is already running".to_string());
+    info!("run_game reached");
+    match
+      run_game(
+        &account_name,
+        &characters_count,
+        &ticket,
+        &game_lang,
+        &full_game_path_str,
+        acts_map_clone,
+        pages_map_clone,
+      ).await
+    {
+      Ok(exit_status) => {
+        let result = format!("Game exited with status: {:?}", exit_status);
+        app_handle_clone.emit_all("game_status", &result).unwrap();
+        info!("{}", result);
+      }
+      Err(e) => {
+        let error = format!("Error launching game: {:?}", e);
+        app_handle_clone.emit_all("game_status", &error).unwrap();
+        error!("{}", error);
+      }
     }
 
-    let auth_info = GLOBAL_AUTH_INFO.read().unwrap();
-    let account_name = auth_info.user_no.to_string();
-    let characters_count = auth_info.character_count.clone();
-    let ticket = auth_info.auth_key.clone();
-    let (game_path, game_lang) = load_config()?;
-
-    let full_game_path = game_path.join("Binaries").join("Tera.exe");
-
-    if !full_game_path.exists() {
-        *is_launching = false;
-        return Err(format!("Game executable not found at: {:?}", full_game_path));
+    info!("Emitting game_ended event");
+    if let Err(e) = app_handle_clone.emit_all("game_ended", ()) {
+      error!("Failed to emit game_ended event: {:?}", e);
     }
 
-    let full_game_path_str = full_game_path
-        .to_str()
-        .ok_or("Invalid path to game executable")?
-        .to_string();
+    let mut is_launching = is_launching_clone.lock().await;
+    *is_launching = false;
+    if let Err(e) = app_handle_clone.emit_all("game_status_changed", false) {
+      error!("Failed to emit game_status_changed event: {:?}", e);
+    }
 
-    let app_handle_clone = app_handle.clone();
-    let is_launching_clone = Arc::clone(&state.is_launching);
+    reset_global_state();
 
-    tokio::task::spawn(async move {
-        // Emit the game_status_changed event at the start of the launch
-        if let Err(e) = app_handle_clone.emit_all("game_status_changed", true) {
-            error!("Failed to emit game_status_changed event: {:?}", e);
-        }
+    info!("Game launch state reset");
+  });
 
-        info!("run_game reached");
-        match
-            run_game(
-                &account_name,
-                &characters_count,
-                &ticket,
-                &game_lang,
-                &full_game_path_str
-            ).await
-        {
-            Ok(exit_status) => {
-                let result = format!("Game exited with status: {:?}", exit_status);
-                app_handle_clone.emit_all("game_status", &result).unwrap();
-                info!("{}", result);
-            }
-            Err(e) => {
-                let error = format!("Error launching game: {:?}", e);
-                app_handle_clone.emit_all("game_status", &error).unwrap();
-                error!("{}", error);
-            }
-        }
-
-        info!("Emitting game_ended event");
-        if let Err(e) = app_handle_clone.emit_all("game_ended", ()) {
-            error!("Failed to emit game_ended event: {:?}", e);
-        }
-
-        let mut is_launching = is_launching_clone.lock().await;
-        *is_launching = false;
-        if let Err(e) = app_handle_clone.emit_all("game_status_changed", false) {
-            error!("Failed to emit game_status_changed event: {:?}", e);
-        }
-
-        reset_global_state();
-
-        info!("Game launch state reset");
-    });
-
-    Ok("Game launch initiated".to_string())
+  Ok("Game launch initiated".to_string())
 }
 
 
 #[tauri::command]
 fn get_language_from_config() -> Result<String, String> {
-    info!("Attempting to read language from config file");
-    let (_, game_lang) = load_config()?;
-    info!("Language read from config: {}", game_lang);
-    Ok(game_lang)
+  info!("Attempting to read language from config file");
+  let (_, game_lang) = load_config()?;
+  info!("Language read from config: {}", game_lang);
+  Ok(game_lang)
 }
 
 #[tauri::command]
 fn save_language_to_config(language: String) -> Result<(), String> {
-    info!("Attempting to save language {} to config file", language);
-    let config_path = find_config_file().ok_or("Config file not found")?;
-    let mut conf = Ini::load_from_file(&config_path).map_err(|e|
-        format!("Failed to load config: {}", e)
-    )?;
+  info!("Attempting to save language {} to config file", language);
+  let config_path = find_config_file().ok_or("Config file not found")?;
+  let mut conf = Ini::load_from_file(&config_path).map_err(|e|
+    format!("Failed to load config: {}", e)
+  )?;
 
-    conf.with_section(Some("game")).set("lang", &language);
+  conf.with_section(Some("game")).set("lang", &language);
 
-    conf.write_to_file(&config_path).map_err(|e| format!("Failed to write config: {}", e))?;
+  conf.write_to_file(&config_path).map_err(|e| format!("Failed to write config: {}", e))?;
 
-    info!("Language successfully saved to config");
-    Ok(())
+  info!("Language successfully saved to config");
+  Ok(())
 }
 
 #[tauri::command]
 async fn reset_launch_state(state: tauri::State<'_, GameState>) -> Result<(), String> {
-    let mut is_launching = state.is_launching.lock().await;
-    *is_launching = false;
-    Ok(())
+  let mut is_launching = state.is_launching.lock().await;
+  *is_launching = false;
+  Ok(())
 }
 
 #[tauri::command]
-fn set_auth_info(auth_key: String, user_name: String, user_no: i32, character_count: String) {
+async fn set_auth_info( 
+  auth_key: String, 
+  user_name: String, 
+  user_no: i32, 
+  character_count: String,
+  session_cookie: Option<String>, 
+) { 
+  {
     let mut auth_info = GLOBAL_AUTH_INFO.write().unwrap();
     auth_info.auth_key = auth_key;
     auth_info.user_name = user_name;
@@ -1060,11 +1097,62 @@ fn set_auth_info(auth_key: String, user_name: String, user_no: i32, character_co
     info!("User No: {}", auth_info.user_no);
     info!("Character Count: {}", auth_info.character_count);
     info!("Auth Key: {}", auth_info.auth_key);
+  }
+
+  if let Some(cookie_value) = session_cookie {
+    if !cookie_value.is_empty() {
+      info!("Rebuilding authenticated client from stored cookie...");
+      let base_url = &*LAUNCHER_BASE_URL;
+      let url = Url::parse(base_url).expect("Failed to parse LAUNCHER_BASE_URL");
+      let host = url.host_str().expect("LAUNCHER_BASE_URL has no host");
+
+      // Build cookie
+      let cookie_str = format!("launcher.sid={}; Domain={}; Path=/", cookie_value, host);
+      
+      let jar = Arc::new(Jar::default());
+      jar.add_cookie_str(&cookie_str, &url);
+
+      // Build new client using the cookie jar
+      let client = Client::builder()
+        .cookie_store(true)
+        .cookie_provider(jar)
+        .build()
+        .expect("Failed to rebuild client");
+
+      // Store client globally
+      let mut client_guard = AUTHENTICATED_CLIENT.lock().await; // <-- 6. 'await' is now valid
+      *client_guard = Some(client);
+      info!("Authenticated client rebuilt successfully.");
+    } else {
+      info!("No session cookie found to rebuild client.");
+    }
+  }
 }
 
+
+/// Handles the complete login process for the TERA launcher.
+///
+/// ### Overview
+/// This function:
+/// 1. Authenticates the user using their credentials.
+/// 2. Retrieves the session cookie and essential account details (account info, auth key, character count).
+/// 3. Fetches and parses the main launcher HTML page to extract `ACTS_MAP` and `PAGES_MAP`.
+/// 4. Stores these maps globally for future use.
+/// 5. Returns a structured JSON response with all relevant login and session data.
+///
+/// The function communicates with the launcher’s backend endpoints, maintains cookies
+/// across requests, and reconstructs necessary URLs dynamically using `LAUNCHER_BASE_URL`.
+///
+/// ### Arguments
+/// * `username` - The user's login name.
+/// * `password` - The user's password.
+///
+/// ### Returns
+/// * `Ok(String)` - JSON containing authentication results and user data.
+/// * `Err(String)` - A descriptive error message in case of failure.
 #[tauri::command]
 async fn login(username: String, password: String) -> Result<String, String> {
-    // 1. Create a client with a persistent cookie jar
+    // 1. Create an HTTP client with a persistent cookie jar
     let cookie_jar = Arc::new(Jar::default());
     let client = Client::builder()
         .cookie_store(true)
@@ -1072,46 +1160,58 @@ async fn login(username: String, password: String) -> Result<String, String> {
         .build()
         .map_err(|e| e.to_string())?;
 
-    // --- Get URLs (UPDATED LOGIC) ---
-
-    // 1. (NEW) Get the base URL from the config (e.g., "http://127.0.0.1:8090")
-    // Make sure your get_config_value() function does not add a trailing slash.
+    // --- Step 1: Define Base URL ---
+    // The base launcher URL is obtained once from the global constant.
     let base_url = &*LAUNCHER_BASE_URL;
-
-    // 2. (NEW) Build the full login URL
     let login_url = format!("{}/launcher/LoginAction", base_url);
 
-    // --- Step 1: POST to /launcher/LoginAction ---
+    // --- Step 2: POST to /launcher/LoginAction (Authentication) ---
     let payload = format!("login={}&password={}", username, password);
 
     let login_res = client
-        .post(&login_url) // Uses the constructed login_url
+        .post(&login_url)
         .body(payload)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .send()
         .await
         .map_err(|e| e.to_string())?;
 
+    // --- Parse the login response and extract session cookie ---
     if !login_res.status().is_success() {
         return Err(format!("Login request failed with status: {}", login_res.status()));
     }
 
-    // Parse the initial login response to check for success
     let login_body: InitialLoginResponse = login_res
         .json()
         .await
         .map_err(|e| format!("Failed to parse login response: {}.", e))?;
 
     if !login_body.return_value {
-        // Return the error message from the API (e.g., "Invalid password")
         return Err(login_body.msg);
     }
 
-    // Store the success message to return later
+    // Parse the cookies to retrieve the session identifier (launcher.sid)
+    let login_url_parsed = Url::parse(&login_url)
+        .map_err(|e| format!("Failed to parse login URL: {}", e))?;
+    let cookie_header_value = cookie_jar.cookies(&login_url_parsed);
+
+    let session_cookie: Option<String> = cookie_header_value
+        .and_then(|header_val| header_val.to_str().ok().map(String::from))
+        .and_then(|cookie_str| {
+            cookie_str.split(';').find_map(|cookie_pair| {
+                let cookie_pair = cookie_pair.trim();
+                if cookie_pair.starts_with("launcher.sid=") {
+                    Some(cookie_pair.trim_start_matches("launcher.sid=").to_string())
+                } else {
+                    None
+                }
+            })
+        });
+
     let success_msg = login_body.msg.clone();
 
-    // --- Step 2: GET /launcher/GetAccountInfoAction ---
-    // (This logic now works correctly using the 'base_url' from config)
+    // --- Step 3: Retrieve account data using the authenticated client ---
+    // These endpoints depend on the valid session cookie.
     let account_info_url = format!("{}/launcher/GetAccountInfoAction", base_url);
     let account_info: AccountInfoResponse = client
         .get(&account_info_url)
@@ -1122,8 +1222,6 @@ async fn login(username: String, password: String) -> Result<String, String> {
         .await
         .map_err(|e| format!("Failed to parse account info: {}", e))?;
 
-    // --- Step 3: GET /launcher/GetAuthKeyAction ---
-    // (This logic now works correctly using the 'base_url' from config)
     let auth_key_url = format!("{}/launcher/GetAuthKeyAction", base_url);
     let auth_key: AuthKeyResponse = client
         .get(&auth_key_url)
@@ -1134,8 +1232,6 @@ async fn login(username: String, password: String) -> Result<String, String> {
         .await
         .map_err(|e| format!("Failed to parse auth key: {}", e))?;
 
-    // --- Step 4: GET /launcher/GetCharacterCountAction ---
-    // (This logic now works correctly using the 'base_url' from config)
     let char_count_url = format!("{}/launcher/GetCharacterCountAction", base_url);
     let char_count: CharCountResponse = client
         .get(&char_count_url)
@@ -1146,138 +1242,427 @@ async fn login(username: String, password: String) -> Result<String, String> {
         .await
         .map_err(|e| format!("Failed to parse character count: {}", e))?;
 
-    // --- Step 5: Aggregate all data and serialize to JSON string ---
+    // --- Step 4: GET /launcher/Main to extract ActsMap/PagesMap ---
+    // Important: Add locale if the server requires it to serve localized pages.
+    let main_url = format!("{}/launcher/Main?locale=en", base_url);
+
+    let main_res = client
+        .get(&main_url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to get launcher main page: {}", e))?;
+
+    if !main_res.status().is_success() {
+        return Err(format!(
+            "Launcher main page request failed with status: {}",
+            main_res.status()
+        ));
+    }
+
+    let main_html = main_res
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read main page body: {}", e))?;
+
+    // KEY STEP: Pass `base_url` so that `extract_maps_from_html` can rebuild the full URLs in ACTS_MAP.
+    let (acts_map, pages_map) = extract_maps_from_html(&main_html, base_url)?;
+
+    // --- Step 5: Save parsed maps into global state ---
+    if let Some(map_object) = acts_map.as_object() {
+        let mut acts_map_guard = GLOBAL_ACTS_MAP.write().unwrap();
+        acts_map_guard.clear();
+        for (key, value) in map_object {
+            if let Some(url_str) = value.as_str() {
+                acts_map_guard.insert(key.clone(), url_str.to_string());
+            }
+        }
+        info!("Saved GLOBAL_ACTS_MAP with {} entries", acts_map_guard.len());
+    }
+
+    if let Some(map_object) = pages_map.as_object() {
+        let mut pages_map_guard = GLOBAL_PAGES_MAP.write().unwrap();
+        pages_map_guard.clear(); // Clear previous map before inserting new values
+        for (key, value) in map_object {
+            if let Some(url_str) = value.as_str() {
+                pages_map_guard.insert(key.clone(), url_str.to_string());
+            }
+        }
+        info!("Saved GLOBAL_PAGES_MAP with {} entries", pages_map_guard.len());
+    }
+
+    // --- Step 6: Consolidate and return the final JSON response ---
     let combined_response = CombinedLoginResponse {
         return_value: true,
-        return_code: login_body.return_code, // Use ReturnCode from initial login
-        msg: success_msg, // Use success message from initial login
+        return_code: login_body.return_code,
+        msg: success_msg,
         character_count: char_count.character_count,
         permission: account_info.permission,
         privilege: account_info.privilege,
         user_no: account_info.user_no,
         user_name: account_info.user_name,
         auth_key: auth_key.auth_key,
+        banned: account_info.banned,
+
+        acts_map: Some(acts_map),
+        pages_map: Some(pages_map),
+
+        session_cookie: session_cookie,
     };
 
-    // Return the combined data as a JSON string, matching the function's original return type
+    // Store the authenticated client globally for subsequent API calls
+    let mut client_guard = AUTHENTICATED_CLIENT.lock().await;
+    *client_guard = Some(client);
+
+    // Serialize and return the combined response as JSON
     serde_json::to_string(&combined_response)
         .map_err(|e| format!("Failed to serialize final login response: {}", e))
 }
 
 #[tauri::command]
 async fn handle_logout(state: tauri::State<'_, GameState>) -> Result<(), String> {
-    let mut is_launching = state.is_launching.lock().await;
-    *is_launching = false;
+  let mut is_launching = state.is_launching.lock().await;
+  *is_launching = false;
 
-    // Reset global authentication information
+  // Reset global authentication information
+  {
     let mut auth_info = GLOBAL_AUTH_INFO.write().unwrap();
     auth_info.auth_key = String::new();
     auth_info.user_name = String::new();
     auth_info.user_no = 0;
     auth_info.character_count = String::new();
+  }
 
-    Ok(())
+  {
+    let mut pages_map = GLOBAL_PAGES_MAP.write().unwrap();
+    pages_map.clear();
+    info!("GLOBAL_PAGES_MAP cleared.");
+  }
+
+  {
+    let mut pages_map = GLOBAL_ACTS_MAP.write().unwrap();
+    pages_map.clear();
+    info!("GLOBAL_ACTS_MAP cleared.");
+  }
+
+  let mut client_guard = AUTHENTICATED_CLIENT.lock().await;
+  *client_guard = None;
+
+  Ok(())
 }
 
+// Modification: We need to access LAUNCHER_BASE_URL inside this function,
+// but it’s not a parameter. The solution is to pass it as an argument to the function,
+// and update the call in `login` accordingly.
+// Move this line if it’s not already at the top of the file.
+// use regex::Regex;
+fn extract_maps_from_html(
+    html: &str,
+    base_url: &str
+) -> Result<(serde_json::Value, serde_json::Value), String> {
+    use regex::Regex;
+    
+    lazy_static! {
+        // Expression to extract the full block of the ACTS_MAP/PAGES_MAP variable (including the braces).
+        static ref RE_ACTSMAP: Regex = 
+            Regex::new(r"var ACTS_MAP\s*=\s*(\{[\s\S]*?\});").expect("Invalid actsMap regex");
+            
+        static ref RE_PAGESMAP: Regex = 
+            Regex::new(r"var PAGES_MAP\s*=\s*(\{[\s\S]*?\});").expect("Invalid pagesMap regex");
+
+        // KEY FIX FOR ACTS_MAP: Captures the Key (Group 1) and the PATH (Group 2)
+        // Pattern looks for: Key: location.protocol + "//HOST:PORT/PATH"
+        // G1 (\w+): The numeric key (e.g., 210)
+        // G2 (/[^"]*?): The path starting with '/' and ending before the closing quote.
+        static ref RE_ACTS_ITEM_PATH: Regex = 
+            Regex::new(r#"(\w+):\s*location\.protocol\s*\+\s*"//\S+?(/[^"]*?)",?"#).expect("Invalid actsMap item path regex");
+
+
+        // --- Regex for PAGES_MAP (General cleanup) ---
+        
+        // Quote all unquoted keys that are tokens (word or number).
+        static ref RE_QUOTE_UNQUOTED_KEYS: Regex = 
+            Regex::new(r#"([,\s{])(\w+)(\s*?:)"#).expect("Invalid quote unquoted keys regex");
+        
+        // Replace JS expressions (if any) with a valid string for PAGES_MAP.
+        static ref RE_JS_PROTOCOL_PAGESMAP: Regex = 
+            Regex::new(r"(location\.protocol[\s\S]+?)(\}|,)").expect("Invalid pagesMap JS value regex");
+            
+        // Remove trailing comma.
+        static ref RE_TRAILING_COMMA: Regex = 
+            Regex::new(r",\s*?\}").expect("Invalid trailing comma regex");
+            
+        // Whitespace normalization
+        static ref RE_NORMALIZE_WHITESPACE: Regex = 
+            Regex::new(r"[\r\n\t ]+").expect("Invalid normalize whitespace regex");
+    }
+
+    // 1. EXTRACT AND BUILD ACTS_MAP (Manual URL reconstruction)
+
+    let acts_map_raw = RE_ACTSMAP.captures(html)
+        .and_then(|cap| cap.get(1))
+        .map(|m| m.as_str())
+        .ok_or("Could not find ACTS_MAP in HTML")?;
+    
+    eprintln!("DEBUG: ACTS_MAP Raw Content:\n{}", acts_map_raw); // <- DEBUG 1
+
+    let mut final_acts_map = serde_json::Map::new();
+
+    // Iterate over all (Key: Path) matches in the raw string
+    for cap in RE_ACTS_ITEM_PATH.captures_iter(acts_map_raw) {
+        // Group 1: Key (e.g., "210")
+        // Group 2: Path (e.g., "/tera/ShopAuth?authKey=%s")
+        let key = cap.get(1).unwrap().as_str().to_string();
+        let path = cap.get(2).unwrap().as_str(); // This path is already just the route
+        
+        // Rebuild the URL: base_url + path
+        let final_url = format!("{}{}", base_url, path);
+        
+        final_acts_map.insert(key, serde_json::Value::String(final_url));
+    }
+    
+    let acts_map = serde_json::Value::Object(final_acts_map);
+    eprintln!("DEBUG: ACTS_MAP Final JSON:\n{}", acts_map.to_string()); // <- DEBUG 2
+
+
+    // 2. EXTRACT AND CLEAN PAGES_MAP (String cleanup)
+    let pages_map_raw = RE_PAGESMAP.captures(html)
+        .and_then(|cap| cap.get(1))
+        .map(|m| m.as_str())
+        .ok_or("Could not find PAGES_MAP in HTML")?;
+    
+    let mut pages_map_str = pages_map_raw.to_string();
+    
+    // Apply cleanup: normalization, JS value replacement, quoting keys, trailing comma removal.
+    pages_map_str = RE_NORMALIZE_WHITESPACE.replace_all(&pages_map_str, " ").to_string();
+    pages_map_str = pages_map_str.trim().replace("{ ", "{").replace(" }", "}");
+    
+    // Replace JS expressions (Group 1) with a placeholder string (if any exist in PAGES_MAP)
+    pages_map_str = RE_JS_PROTOCOL_PAGESMAP.replace_all(&pages_map_str, r#""/JS/EXPRESSION/REMOVED"$2"#).to_string();
+
+    // Quote all unquoted keys.
+    pages_map_str = RE_QUOTE_UNQUOTED_KEYS.replace_all(&pages_map_str, r#"$1"$2"$3"#).to_string();
+
+    // Remove trailing comma.
+    pages_map_str = RE_TRAILING_COMMA.replace_all(&pages_map_str, "}").to_string();
+
+    eprintln!("DEBUG: PAGES_MAP Cleaned Content Final:\n{}", pages_map_str); // <- DEBUG 3
+
+    // 3. PARSE PAGES_MAP
+    let pages_map: serde_json::Value = serde_json::from_str(&pages_map_str)
+        .map_err(|e| format!("Failed to parse pagesMap JSON: {}", e))?;
+
+    Ok((acts_map, pages_map))
+}
 
 #[tauri::command]
 async fn check_server_connection() -> Result<bool, String> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|e| e.to_string())?;
+  let client = Client::builder()
+    .timeout(Duration::from_secs(10))
+    .build()
+    .map_err(|e| e.to_string())?;
 
-    match client.get(get_files_server_url()).send().await {
-        Ok(response) => Ok(response.status().is_success()),
-        Err(e) => Err(e.to_string()),
-    }
+  match client.get(get_files_server_url()).send().await {
+    Ok(response) => Ok(response.status().is_success()),
+    Err(e) => Err(e.to_string()),
+  }
 }
 
 #[tauri::command]
 fn get_client_version() -> Result<String, String> {
-    Ok(get_config_value("CLIENT_VERSION"))
+  Ok(get_config_value("CLIENT_VERSION"))
 }
+
+#[tauri::command]
+async fn get_fresh_account_info() -> Result<String, String> {
+  let client_guard = AUTHENTICATED_CLIENT.lock().await;
+  if let Some(client) = &*client_guard {
+    // We have an authenticated client, fetch fresh data
+    
+    let base_url = &*LAUNCHER_BASE_URL;
+
+    // --- Step 1: GET /launcher/GetAccountInfoAction ---
+    let account_info_url = format!("{}/launcher/GetAccountInfoAction", base_url);
+    let account_info: AccountInfoResponse = client
+      .get(&account_info_url)
+      .send()
+      .await
+      .map_err(|e| format!("(Re-check) Failed to get account info: {}", e))?
+      .json()
+      .await
+      .map_err(|e| format!("(Re-check) Failed to parse account info: {}", e))?;
+
+    // --- Step 2: GET /launcher/GetAuthKeyAction ---
+    // Request a new AuthKey so that the Node.js backend knows we’re still active
+    // and to ensure we’re using a valid key.
+    let auth_key_url = format!("{}/launcher/GetAuthKeyAction", base_url);
+    let auth_key: AuthKeyResponse = client
+      .get(&auth_key_url)
+      .send()
+      .await
+      .map_err(|e| format!("(Re-check) Failed to get auth key: {}", e))?
+      .json()
+      .await
+      .map_err(|e| format!("(Re-check) Failed to parse auth key: {}", e))?;
+
+    // --- Step 3: GET /launcher/GetCharacterCountAction ---
+    let char_count_url = format!("{}/launcher/GetCharacterCountAction", base_url);
+    let char_count: CharCountResponse = client
+      .get(&char_count_url)
+      .send()
+      .await
+      .map_err(|e| format!("(Re-check) Failed to get char count: {}", e))?
+      .json()
+      .await
+      .map_err(|e| format!("(Re-check) Failed to parse char count: {}", e))?;
+
+    // actsMap & pagesMap refresh
+    info!("Refreshing ActsMap and PagesMap for existing session...");
+    let main_url = format!("{}/launcher/Main", base_url); 
+    
+    let main_res = client
+      .get(&main_url)
+      .send()
+      .await
+      .map_err(|e| format!("(Re-check) Failed to get launcher main page: {}", e))?;
+
+    if !main_res.status().is_success() {
+      return Err(format!("(Re-check) Launcher main page request failed with status: {}", main_res.status()));
+    }
+
+    let main_html = main_res.text().await.map_err(|e| format!("(Re-check) Failed to read main page body: {}", e))?;
+    let (acts_map, pages_map) = extract_maps_from_html(&main_html, base_url)?;
+
+    if let Some(map_object) = pages_map.as_object() {
+        let mut pages_map_guard = GLOBAL_PAGES_MAP.write().unwrap();
+        pages_map_guard.clear();
+        for (key, value) in map_object {
+            if let Some(url_str) = value.as_str() {
+                pages_map_guard.insert(key.clone(), url_str.to_string());
+            }
+        }
+        info!("(Re-check) Stored GLOBAL_PAGES_MAP with {} entries", pages_map_guard.len());
+    }
+
+    if let Some(map_object) = acts_map.as_object() {
+        let mut acts_map_guard = GLOBAL_ACTS_MAP.write().unwrap();
+        acts_map_guard.clear();
+        for (key, value) in map_object {
+            if let Some(url_str) = value.as_str() {
+                acts_map_guard.insert(key.clone(), url_str.to_string());
+            }
+        }
+        info!("(Re-check) Stored GLOBAL_ACTS_MAP with {} entries", acts_map_guard.len());
+    }
+
+    // --- Step 4: Combine all the data ---
+    let combined_response = CombinedLoginResponse {
+      return_value: true,
+      return_code: 0, // Not a login, so 0 is fine
+      msg: "success".to_string(),
+      character_count: char_count.character_count,
+      permission: account_info.permission,
+      privilege: account_info.privilege,
+      user_no: account_info.user_no,
+      user_name: account_info.user_name,
+      auth_key: auth_key.auth_key, // Use the new AuthKey!
+      banned: account_info.banned,
+      acts_map: None,
+      pages_map: None,
+      session_cookie: None, 
+    };
+    
+    // --- Step 5: Return the fresh data to JS ---
+    serde_json::to_string(&combined_response)
+      .map_err(|e| format!("Failed to serialize fresh info: {}", e))
+
+  } else {
+    // No client found — the user is not logged in or the session was lost.
+    Err("User is not authenticated (no client)".to_string())
+  }
+}
+
 
 fn main() {
 
 
-    dotenv().ok();
+  dotenv().ok();
 
-    let (tera_logger, mut tera_log_receiver) = teralib::setup_logging();
+  let (tera_logger, mut tera_log_receiver) = teralib::setup_logging();
 
-    // Configure only the teralib logger
-    log::set_boxed_logger(Box::new(tera_logger)).expect("Failed to set logger");
-    log::set_max_level(LevelFilter::Info);
+  // Configure only the teralib logger
+  log::set_boxed_logger(Box::new(tera_logger)).expect("Failed to set logger");
+  log::set_max_level(LevelFilter::Info);
 
-    // Create an asynchronous channel for logs
-    let (log_sender, mut log_receiver) = mpsc::channel::<String>(100);
+  // Create an asynchronous channel for logs
+  let (log_sender, mut log_receiver) = mpsc::channel::<String>(100);
 
-    // Create a Tokio runtime
-    let rt = Runtime::new().expect("Failed to create Tokio runtime");
+  // Create a Tokio runtime
+  let rt = Runtime::new().expect("Failed to create Tokio runtime");
 
-    // Spawn a task to receive logs and send them through the channel
-    rt.spawn(async move {
-        while let Some(log_message) = tera_log_receiver.recv().await {
-            println!("Teralib: {}", log_message);
-            if let Err(e) = log_sender.send(log_message).await {
-                eprintln!("Failed to send log message: {}", e);
-            }
+  // Spawn a task to receive logs and send them through the channel
+  rt.spawn(async move {
+    while let Some(log_message) = tera_log_receiver.recv().await {
+      println!("Teralib: {}", log_message);
+      if let Err(e) = log_sender.send(log_message).await {
+        eprintln!("Failed to send log message: {}", e);
+      }
+    }
+  });
+
+
+  let game_status_receiver = get_game_status_receiver();
+  let game_state = GameState {
+    status_receiver: Arc::new(Mutex::new(game_status_receiver)),
+    is_launching: Arc::new(Mutex::new(false)),
+  };
+
+  tauri::Builder
+    ::default()
+    .manage(game_state)
+    .setup(|app| {
+      let window = app.get_window("main").unwrap();
+      let app_handle = app.handle();
+      println!("Tauri setup started");
+
+      #[cfg(debug_assertions)]
+      window.open_devtools();
+
+      // Spawn an asynchronous task to receive logs from the channel and send them to the frontend
+      tauri::async_runtime::spawn(async move {
+        while let Some(log_message) = log_receiver.recv().await {
+          let _ = app_handle.emit_all("log_message", log_message);
         }
-    });
+      });
+
+      println!("Tauri setup completed");
 
 
-    let game_status_receiver = get_game_status_receiver();
-    let game_state = GameState {
-        status_receiver: Arc::new(Mutex::new(game_status_receiver)),
-        is_launching: Arc::new(Mutex::new(false)),
-    };
-
-    tauri::Builder
-        ::default()
-        .manage(game_state)
-        .setup(|app| {
-            let window = app.get_window("main").unwrap();
-            let app_handle = app.handle();
-            println!("Tauri setup started");
-
-            #[cfg(debug_assertions)]
-            window.open_devtools();
-
-            // Spawn an asynchronous task to receive logs from the channel and send them to the frontend
-            tauri::async_runtime::spawn(async move {
-                while let Some(log_message) = log_receiver.recv().await {
-                    let _ = app_handle.emit_all("log_message", log_message);
-                }
-            });
-
-            println!("Tauri setup completed");
-
-
-            Ok(())
-        })
-        .invoke_handler(
-            tauri::generate_handler![
-                handle_launch_game,
-                get_game_status,
-                select_game_folder,
-                get_game_path_from_config,
-                save_game_path_to_config,
-                reset_launch_state,
-                login,
-                set_auth_info,
-                get_language_from_config,
-                save_language_to_config,
-                get_files_to_update,
-                update_file,
-                handle_logout,
-                generate_hash_file,
-                check_server_connection,
-                check_update_required,
-                download_all_files,
-                get_client_version,
-                check_maintenance_and_notify,
-            ]
-        )
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+      Ok(())
+    })
+    .invoke_handler(
+      tauri::generate_handler![
+        handle_launch_game,
+        get_game_status,
+        select_game_folder,
+        get_game_path_from_config,
+        save_game_path_to_config,
+        reset_launch_state,
+        login,
+        set_auth_info,
+        get_language_from_config,
+        save_language_to_config,
+        get_files_to_update,
+        update_file,
+        handle_logout,
+        generate_hash_file,
+        check_server_connection,
+        check_update_required,
+        download_all_files,
+        get_client_version,
+        check_maintenance_and_notify,
+        get_fresh_account_info,
+      ]
+    )
+    .run(tauri::generate_context!())
+    .expect("error while running tauri application");
 }

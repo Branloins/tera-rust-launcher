@@ -63,7 +63,8 @@
     "MAINTENANCE_MESSAGE": "Le serveur est en maintenance. Veuillez réessayer plus tard.",
     "START_TIME": "Heure de début :",
     "END_TIME": "Heure de fin :",
-    "ACKNOWLEDGE": "OK"
+    "ACKNOWLEDGE": "OK",
+    "ACCOUNT_BANNED": "Compte bloqué. Veuillez contacter le support."
   },
   "EUR": {
     "LOGIN_TITLE": "Login",
@@ -129,7 +130,8 @@
     "MAINTENANCE_MESSAGE": "The server is under maintenance. Please try again later.",
     "START_TIME": "Start Time:",
     "END_TIME": "End Time:",
-    "ACKNOWLEDGE": "OK"
+    "ACKNOWLEDGE": "OK",
+    "ACCOUNT_BANNED": "Account blocked. Please contact support."
   },
   "RUS": {
     "LOGIN_TITLE": "Вход",
@@ -195,7 +197,8 @@
     "MAINTENANCE_MESSAGE": "Сервер находится на техническом обслуживании. Пожалуйста, попробуйте позже.",
     "START_TIME": "Время начала:",
     "END_TIME": "Время окончания:",
-    "ACKNOWLEDGE": "OK"
+    "ACKNOWLEDGE": "OK",
+    "ACCOUNT_BANNED": "Аккаунт заблокирован. Свяжитесь со службой поддержки."
   },
   "GER": {
     "LOGIN_TITLE": "Anmelden",
@@ -261,6 +264,7 @@
     "MAINTENANCE_MESSAGE": "Der Server wird gewartet. Bitte versuchen Sie es später erneut.",
     "START_TIME": "Startzeit:",
     "END_TIME": "Endzeit:",
-    "ACKNOWLEDGE": "OK"
+    "ACKNOWLEDGE": "OK",
+    "ACCOUNT_BANNED": "Konto gesperrt. Bitte wenden Sie sich an den Support."
   }
 }
