@@ -285,12 +285,25 @@ async fn launch_game() -> Result<ExitStatus, Box<dyn std::error::Error>> {
 
     tcs.notified().await;
 
-    let mut child = Command::new(GLOBAL_CREDENTIALS.get_game_path())
-        .arg(format!(
-            "-LANGUAGEEXT={}",
-            GLOBAL_CREDENTIALS.get_game_lang()
-        ))
-        .spawn()?;
+    let mut cmd = Command::new(GLOBAL_CREDENTIALS.get_game_path());
+
+    #[cfg(target_os = "linux")]
+    {
+        cmd = Command::new(PROTON_PATH);
+
+        cmd.arg("run")
+           .arg(GLOBAL_CREDENTIALS.get_game_path());
+
+        cmd.env("STEAM_COMPAT_CLIENT_INSTALL_PATH", STEAM_PATH);
+        cmd.env("STEAM_COMPAT_DATA_PATH", COMPAT_PATH);
+    }
+
+    cmd.arg(format!(
+        "-LANGUAGEEXT={}",
+        GLOBAL_CREDENTIALS.get_game_lang()
+    ));
+
+    let mut child = cmd.spawn()?;
 
     let pid = child.id();
     info!("Game process spawned with PID: {}", pid);
